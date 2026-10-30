@@ -24,8 +24,9 @@ name: On a GPU
 # next run destroys any state an earlier one left.
 on:
   schedule:
-    # Sunday: aws-eks-reference-platform runs on Wednesday and the flagship,
-    # whose GPU run shares the account's GPU quota, on Thursday.
+    # Sunday, which no other weekly cloud run takes: aws-eks-reference-platform
+    # runs on Wednesday and the flagship on AWS, whose GPU shares the account's
+    # quota, on Thursday (its GKE and AKS legs on Friday and Tuesday).
     - cron: "23 3 * * 0"
   workflow_dispatch:
     inputs:
