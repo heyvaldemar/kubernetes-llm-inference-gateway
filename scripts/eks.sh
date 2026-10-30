@@ -471,7 +471,9 @@ for e in json.load(sys.stdin) or []:
         # it does not name is printed, not guessed.
         *:instance/*) s="$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text 2>&1)" || true
                       case "$s" in
-                        terminated|*InvalidInstanceID.NotFound*) false ;;
+                        # Gone: terminated, unknown, or no longer listed at all,
+                        # which EC2 answers with no reservation (None).
+                        terminated|None|*InvalidInstanceID.NotFound*) false ;;
                         pending|running|shutting-down|stopping|stopped) echo "$id: $s" >&2; true ;;
                         *) echo "$id: state unknown ($s)" >&2; true ;;
                       esac ;;
