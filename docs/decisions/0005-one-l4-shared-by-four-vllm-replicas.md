@@ -28,6 +28,35 @@ Routing needs more than one model server, and the comparison the kind run makes 
 - The planted breaks run on kind, where each costs nothing. The GPU run runs the same checks, which kind shows their breaks every day, and its own checks of the GPU and the weights without plants of their own.
 - A new vLLM, model or driver changes the weekly numbers. A number in the README is copied from the run it names.
 
+## On AWS, 2026-10-30: no L4 to be had
+
+No run has reached the comparison yet. Every billed run was torn down, and the residue check of the last one found nothing of it or of any earlier run. The runs, and what each changed:
+
+| Run | What happened | Cost, on-demand estimate |
+|---|---|---|
+| [41067783938](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41067783938) | The cluster and the CPU node came up; the GPU node group was still creating 19.5 minutes later, with no g6.xlarge launched, when the step's timeout killed Terraform. Its S3 lock stayed and refused both destroys; the fallback deleted the node groups through the CLI. | about $0.12 |
+| [41075374482](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41075374482) | The sweep removed that lock and destroyed the 23 resources left. The reservation, asked through Terraform after the cluster, had no answer after five minutes; it turned out `failed`, which bills nothing. | about $0.05 |
+| [41080156587](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41080156587) | Reserved through the CLI after the cluster: us-east-1a, b, c and d refused, InsufficientInstanceCapacity. | about $0.04 |
+| [41083558573](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41083558573) | Reserved before anything else: all five zones that offer both instance types (a, b, c, d, f) refused. Nothing was made. | $0.00 |
+| [41084495170](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41084495170) | Seven rounds over the five zones, 15:52 to 16:06 UTC: no g6.xlarge in any. Nothing was made; residue clean. | $0.00 |
+
+CloudTrail in the account holds 14 refused g6.xlarge launches in us-east-1a and 18 in us-east-1b on that day, all `Server.InsufficientInstanceCapacity`. The flagship's GPU run got its g6.xlarge in its two zones, us-east-1a and b, between 03:09 and 05:14 UTC that day (its run 40995734934). L4 capacity in the region comes and goes, and on that afternoon there was none.
+
+What the runs changed, all of it in the Decision above: the L4 is reserved before anything is made, through the CLI and imported into the state; each apply is interrupted before its step's timeout; the down job removes a stale lock and deletes node groups through the CLI when a destroy fails; the sweep destroys any earlier run's state and stops any earlier cluster's instance or reservation that no state holds; the residue check counts only an instance state EC2 names.
+
+## When there is no L4
+
+The run asks for one g6.xlarge for fifteen minutes and stops when none comes, at no cost. A week without an L4 is a week without a GPU number; nothing here hides it. If that keeps happening, the GPU types under the same quota are, at on-demand prices from the AWS Price List API in preflight run [41087587141](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41087587141):
+
+| Instance | GPU | vCPUs (of the 8) | An hour | Fits the comparison |
+|---|---|---|---|---|
+| g6.xlarge | L4, 24 GB | 4 | $0.8048 | yes: the run as decided |
+| g6.2xlarge | L4, 24 GB | 8 | $0.9776 | the same L4 from the same hosts, so no help when L4s are gone; all of the quota, so never beside the flagship's run |
+| g5.xlarge | A10G, 24 GB | 4 | $1.006 | yes: the same memory, the same vLLM image (CUDA 13 runs on Ampere), its own capacity pool. The most a run could cost is $1.74 at today's timeouts, so the up job's 55 minutes would come down to 45 for $1.50 |
+| g4dn.xlarge | T4, 16 GB | 4 | $0.526 | no: 16 GB holds four copies of the model with almost no KV cache, and the T4 has no bfloat16 |
+
+The fallback this record proposes, not yet built: when fifteen minutes give no L4, the same rounds for a g5.xlarge, the GPU named in the results and in the README's table, and the A10G's numbers kept apart from the L4's.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.
