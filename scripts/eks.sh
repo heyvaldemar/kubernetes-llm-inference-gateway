@@ -12,10 +12,11 @@
 #   sweep      destroy what an earlier run of this workflow left: any other
 #              state under inference-runs/ that still holds resources
 #   unlock     remove the lock a stopped Terraform left on this run's state
-#   reserve    after the first apply: an On-Demand Capacity Reservation for
-#              one L4, tried in each of the run's zones until one gives it,
-#              and the zone written to the run's variables for the second
-#              apply, which makes the GPU node in it
+#   reserve    before anything else is made: an On-Demand Capacity
+#              Reservation for one L4, tried in each of the run's zones until
+#              one gives it, imported into the run's state, and the zone
+#              written to the run's variables, so the apply makes the GPU
+#              node in it
 #   gpu        NVIDIA's device plugin, and the GPU node offering its L4 as four
 #   check      after scripts/up.sh: four model servers, all on the GPU node,
 #              all on the same L4, each serving the pinned model with weights
@@ -23,9 +24,10 @@
 #   tokens     what each route's output tokens cost, from the e2e's results
 #              and the prices preflight read
 #   diagnose   what the cluster looked like, when a step failed
-#   stop       when a destroy failed: the node groups deleted, any instance
-#              of the run terminated and its reservation cancelled by the AWS
-#              CLI, so nothing bills while a person looks
+#   stop       the node groups deleted, any instance of the run terminated
+#              and its reservation cancelled by the AWS CLI: when a destroy
+#              failed, so nothing bills while a person looks, and after every
+#              destroy, for what the state never held
 #   residue    after the destroy, anything still tagged with the run's
 #              cluster, or with any earlier run of this project: none is the
 #              only passing answer
@@ -141,6 +143,11 @@ if not refused:
     aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" \
       --query 'CapacityReservations[].[CapacityReservationId, AvailabilityZone, State, CreateDate, Tags[?Key==`'"$TAG"'/cluster`] | [0].Value]' --output text \
       | while read -r id zone state created owner; do say "reservation $id ($owner), $zone: $state, made $created"; done
+    # And its instances in any state but terminated: one a teardown missed
+    # bills by the hour, or for its disk while stopped.
+    aws ec2 describe-instances --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped \
+      --query 'Reservations[].Instances[].[InstanceId, InstanceType, State.Name, LaunchTime, Tags[?Key==`'"$TAG"'/cluster`] | [0].Value]' --output text \
+      | while read -r id itype state launched owner; do say "instance $id ($owner), $itype: $state, launched $launched"; done
     held="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=state,Values=active,pending \
               --query 'CapacityReservations[].CapacityReservationId' --output text)"
     if [ -n "$held" ]; then
@@ -217,9 +224,21 @@ PY
     # refuses the request (InsufficientInstanceCapacity), or it takes it and
     # the reservation turns to failed, which bills nothing. Run 41075374482
     # asked through Terraform, which had no answer after five minutes; the
-    # reservation it left in us-east-1a had failed. Each zone gets three
-    # minutes for an answer and three for the reservation to settle.
-    zones="$(terraform -chdir="$ROOT/eks" output -json zones | python3 -I -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')"
+    # reservation it left in us-east-1a had failed. Each zone gets two
+    # minutes for an answer and two for the reservation to settle.
+    # The zones eks/network.tf will use, asked of EC2 before anything is
+    # made: available, offering both instance types, and not use1-az3. The
+    # GPU reservation's precondition refuses a zone Terraform would not use.
+    zones="$(python3 -I -c '
+import json, sys
+zones, gpu, node = (json.loads(a) for a in sys.argv[1:4])
+print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name in gpu and name in node)))' \
+      "$(aws ec2 describe-availability-zones --filters Name=opt-in-status,Values=opt-in-not-required Name=state,Values=available \
+           --query 'AvailabilityZones[].[ZoneName, ZoneId]' --output json)" \
+      "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=$GPU_TYPE" \
+           --query 'InstanceTypeOfferings[].Location' --output json)" \
+      "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=${NODE_TYPE:?}" \
+           --query 'InstanceTypeOfferings[].Location' --output json)")"
     ends="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_reservation_ends"])' "$VARS")"
     tags="$(python3 -I -c 'import json,sys; t, p, c, r = sys.argv[1:]; print(json.dumps([{"ResourceType": "capacity-reservation", "Tags": [
       {"Key": t + "/project", "Value": p}, {"Key": t + "/cluster", "Value": c}, {"Key": "run-id", "Value": r},
@@ -232,12 +251,12 @@ PY
     }
     refused=""
     for z in $zones; do
-      out="$(AWS_MAX_ATTEMPTS=2 timeout 3m aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
+      out="$(AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
                --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
                --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)" && rc=0 || rc=$?
       state=""
       if [ "$rc" -eq 0 ]; then
-        for _ in $(seq 1 36); do
+        for _ in $(seq 1 24); do
           state="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$out" --query 'CapacityReservations[0].State' --output text)"
           [ "$state" = pending ] || break
           sleep 5
@@ -253,7 +272,7 @@ PY
       elif grep -q InsufficientInstanceCapacity <<<"$out"; then
         say "$z: no $GPU_TYPE capacity"
       elif [ "$rc" -eq 124 ]; then
-        say "$z: no answer in three minutes"
+        say "$z: no answer in two minutes"
       else
         printf '%s\n' "$out" >&2
         exit 1
@@ -403,7 +422,7 @@ for e in json.load(sys.stdin) or []:
                   --query 'CapacityReservations[].CapacityReservationId' --output text); do
       aws ec2 cancel-capacity-reservation --capacity-reservation-id "$cr" >/dev/null && say "cancelled reservation $cr"
     done
-    say "no node of $CLUSTER is left running and no reservation held; the rest waits for the next run's sweep"
+    say "no node of $CLUSTER is left running and no reservation of it held"
     ;;
 
   residue)
@@ -456,7 +475,7 @@ for e in json.load(sys.stdin) or []:
     reserved="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
       --query 'CapacityReservations[].[InstanceType, CreateDate, State]' --output json)"
     python3 -I - "$instances" "$reserved" "$STARTED" "$(date +%s)" "$GPU_TYPE" "$GPU_USD" "$NODE_TYPE" "$NODE_USD" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
-      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "$MAX_RUN_USD" <<'PY'
+      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "$MAX_RUN_USD" "${APPLIED:-}" <<'PY'
 import datetime as dt, json, re, sys
 instances, reserved = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 started, now = int(sys.argv[3]), int(sys.argv[4])
@@ -466,7 +485,10 @@ price = {gpu_type: gpu, node_type: node}
 eks, ipv4, gp3, cap = map(float, sys.argv[11:15])
 def epoch(s):
     return int(dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
-rows = [("EKS control plane, from the apply to the end of the destroy", eks, (now - started) / 3600)]
+# The control plane from the apply, which a run that found no L4 never
+# reached, to the end of the destroy.
+applied = int(sys.argv[15]) if sys.argv[15] else now
+rows = [("EKS control plane, from the apply to the end of the destroy", eks, (now - applied) / 3600)]
 # A reservation bills as its instance would, from its start to its end,
 # with the instance inside it or not, and the instance it holds bills
 # nothing more. Priced to the end of the destroy, which ends it.

@@ -23,16 +23,17 @@ data "aws_ec2_instance_type_offerings" "node" {
 }
 
 locals {
-  # Every zone that offers both instance types, up to four, so the run can
-  # reserve an L4 in whichever has one free: g6 capacity in a zone comes and
-  # goes. use1-az3 takes no EKS control plane.
+  # Every zone that offers both instance types, so the run can reserve an L4
+  # in whichever has one free: g6 capacity in a zone comes and goes.
+  # use1-az3 takes no EKS control plane. scripts/eks.sh reserve asks EC2 for
+  # the same list before anything here exists.
   zone_ids = zipmap(data.aws_availability_zones.available.names, data.aws_availability_zones.available.zone_ids)
   offered = setintersection(
     [for name, id in local.zone_ids : name if id != "use1-az3"],
     data.aws_ec2_instance_type_offerings.node[var.node_instance_type].locations,
     data.aws_ec2_instance_type_offerings.node[var.gpu_instance_type].locations,
   )
-  azs     = slice(sort(tolist(local.offered)), 0, min(4, length(local.offered)))
+  azs     = sort(tolist(local.offered))
   subnets = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 4, i)]
 }
 

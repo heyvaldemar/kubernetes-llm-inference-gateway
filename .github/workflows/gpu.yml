@@ -125,6 +125,7 @@ jobs:
       id-token: write
     outputs:
       started: ${{ steps.start.outputs.at }}
+      applied: ${{ steps.apply.outputs.at }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -204,35 +205,35 @@ jobs:
         id: start
         run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      # Each apply is interrupted before its step's timeout could kill it, so
+      # Capacity first (ADR 5): run 41067783938's GPU node group waited 19
+      # minutes on launches AWS refused for capacity in both of its zones. An
+      # L4 is reserved before anything else is made; with none in any zone,
+      # the run stops here, and a reservation EC2 could not fill bills nothing.
+      - name: An L4, reserved in the first zone that has one
+        # Up to four minutes for each of up to five zones.
+        timeout-minutes: 22
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          VARS: ${{ github.workspace }}/run.tfvars.json
+        run: ./scripts/eks.sh reserve | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The apply is interrupted before its step's timeout could kill it, so
       # Terraform stops on its own, writes what it made to the state and
       # releases the state's lock. Run 41067783938's apply was killed by the
       # step's timeout while the GPU node group was still being created: the
       # state never held that group, and the lock stayed.
-      - name: Apply, the cluster and the CPU node
-        timeout-minutes: 28
-        run: timeout -s INT -k 3m 24m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
+      - name: Apply
+        id: apply
+        timeout-minutes: 34
+        run: |
+          echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+          timeout -s INT -k 3m 30m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
 
       - name: The cluster, from the runner's address
         run: |
           aws eks update-kubeconfig --name "$CLUSTER" >/dev/null
           kubectl wait nodes --all --for=condition=Ready --timeout=600s
           kubectl -n kube-system rollout status deployment/coredns --timeout=300s
-
-      # Capacity first (ADR 5): run 41067783938's GPU node group waited 19
-      # minutes on launches AWS refused for capacity in both of its zones.
-      - name: An L4, reserved in the first zone that has one
-        # Up to six minutes for each of up to four zones.
-        timeout-minutes: 26
-        env:
-          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-          VARS: ${{ github.workspace }}/run.tfvars.json
-        run: ./scripts/eks.sh reserve | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Apply, the GPU node in the reservation
-        timeout-minutes: 20
-        run: |
-          timeout -s INT -k 3m 16m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
           kubectl get nodes -L node.kubernetes.io/instance-type,topology.kubernetes.io/zone
 
       - name: The L4, offered as four
@@ -341,6 +342,9 @@ jobs:
           ./scripts/eks.sh unlock
           terraform -chdir=eks destroy -input=false -auto-approve -var-file="$PWD/run.tfvars.json" \
             || { ./scripts/eks.sh stop; terraform -chdir=eks destroy -input=false -auto-approve -var-file="$PWD/run.tfvars.json"; }
+          # And whatever the state never held: a reservation the reserve
+          # step had not imported when it stopped.
+          ./scripts/eks.sh stop
 
       - name: When the destroy failed, no node left billing
         if: failure() && steps.state.outputs.applied == 'true'
@@ -354,6 +358,7 @@ jobs:
         if: always() && needs.up.outputs.started != ''
         env:
           STARTED: ${{ needs.up.outputs.started }}
+          APPLIED: ${{ needs.up.outputs.applied }}
           GPU_USD: ${{ needs.preflight.outputs.gpu_usd }}
           NODE_USD: ${{ needs.preflight.outputs.node_usd }}
         run: |
