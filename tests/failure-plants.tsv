@@ -1,0 +1,4 @@
+# file	old	new	what tests/failure-modes.sh must notice
+"deploy/sick-replica.yaml"	"            - --failure-injection-rate=100\n"	"            - --failure-injection-rate=0\n"	"the sick replica answers like the others, so there is no failure to record"
+"tests/failure-modes.sh"	"CHAIN=FORWARD   #"	"CHAIN=INPUT   #"	"the packets are dropped where pod-to-pod traffic never passes, so nothing is unreachable"
+"scripts/crash-one.sh"	"docker exec \"$NODE\" kill -9 \"$pid\"\n"	"docker exec \"$NODE\" kill -0 \"$pid\"\n"	"the crash signals nothing, so no replica goes down"

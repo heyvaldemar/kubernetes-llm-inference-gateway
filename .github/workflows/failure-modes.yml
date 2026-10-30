@@ -1,0 +1,101 @@
+name: Failure modes
+
+# What each route does when one of four replicas fails: one that answers fast
+# errors while its probe says healthy, one that cannot be reached while
+# Kubernetes still calls it Ready, one whose server crashes. tests/failure-modes.sh
+# records the numbers for the llm-d router and for the round-robin Service and
+# fails only if a scenario did not happen as designed; on main and on the
+# schedule each of its checks is also shown the break it exists for
+# (tests/failure-plants.tsv). Every week, and on a push that changes it, so a
+# router release that changes how it treats a failing replica shows up. Twice:
+# the router as released, and llm-d's main build with the endpoint-health-filter
+# no release carries yet (deploy/router-health-filter.yaml).
+on:
+  push:
+    branches: [main]
+    paths:
+      - tests/failure-modes.sh
+      - tests/failure-plants.tsv
+      - deploy/**
+      - loadgen/probe.py
+      - scripts/**
+      - images.lock
+      - .github/workflows/failure-modes.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - tests/failure-modes.sh
+      - tests/failure-plants.tsv
+      - deploy/**
+      - loadgen/probe.py
+      - scripts/**
+      - images.lock
+      - .github/workflows/failure-modes.yml
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: failure-modes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  failure-modes:
+    name: One replica fails, three ways (${{ matrix.router.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        router:
+          - name: release
+            extra: ""
+          - name: health-filter
+            extra: deploy/router-health-filter.yaml
+    # Up and the scenarios take about seven minutes; the plants run both four
+    # more times.
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: kind and helm, pinned and checked
+        run: |
+          set -euo pipefail
+          . ./images.lock
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256_AMD64}  kind" | sha256sum -c -
+          install -m 0755 kind "$HOME/.local/bin/kind"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256_AMD64}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          install -m 0755 linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Up
+        env:
+          ROUTER_EXTRA_VALUES: ${{ matrix.router.extra }}
+        run: ./scripts/up.sh
+
+      - name: The failure scenarios
+        env:
+          RESULTS: ${{ runner.temp }}/results
+        run: ./tests/failure-modes.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: failure-modes-${{ matrix.router.name }}
+          path: ${{ runner.temp }}/results/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: The checks, shown each break they exist for
+        if: github.event_name != 'pull_request' && matrix.router.name == 'release'
+        env:
+          PLANTS: tests/failure-plants.tsv
+        run: python3 -I -u tests/plant-violations.py -- bash -c './scripts/up.sh >/dev/null 2>&1 && ./tests/failure-modes.sh >/dev/null 2>&1' | tee -a "$GITHUB_STEP_SUMMARY"

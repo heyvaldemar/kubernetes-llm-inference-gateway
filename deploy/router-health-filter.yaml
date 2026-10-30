@@ -1,0 +1,30 @@
+# Layered over router-values.yaml (ROUTER_EXTRA_VALUES): the same router with
+# llm-d's endpoint-health-filter first in its profile. After 5 consecutive 502
+# or 503 responses from a replica it ejects that replica for 30 s, longer each
+# time, up to 5 m (llm-d/llm-d-router#3326, merged in #3328 on 2026-10-23).
+# No release carries it yet (v1.0.0 is from 2026-10-16), so this runs llm-d's
+# main build, pinned by digest, and the filter is Alpha, so the EPP needs
+# allow-experimental-plugins. Only tests/failure-modes.sh uses it; when a
+# release carries the filter, this moves to that release and loses the flag.
+router:
+  epp:
+    image:
+      tag: main@sha256:7d22d0013c05584fa723284c63b5c67d285d2168861d3093d57e12a682defa29
+    flags:
+      allow-experimental-plugins: true
+    pluginsCustomConfig:
+      optimized-baseline-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: endpoint-health-filter
+        - type: approx-prefix-cache-producer
+        - type: inflight-load-producer
+        - type: prefix-cache-affinity-filter
+        - type: token-load-scorer
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: endpoint-health-filter
+          - pluginRef: prefix-cache-affinity-filter
+          - pluginRef: token-load-scorer

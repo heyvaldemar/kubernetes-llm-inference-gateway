@@ -37,7 +37,7 @@ jobs:
           shellcheck scripts/*.sh tests/*.sh
 
       - name: The load generator compiles
-        run: python3 -I -m py_compile loadgen/loadgen.py tests/plant-violations.py
+        run: python3 -I -m py_compile loadgen/loadgen.py loadgen/probe.py tests/plant-violations.py
 
   e2e:
     name: Prefix-aware routing against round-robin

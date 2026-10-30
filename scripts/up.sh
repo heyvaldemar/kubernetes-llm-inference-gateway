@@ -5,13 +5,15 @@
 # applies what changed and restarts the model servers, so every test starts
 # with every prefix cache empty.
 #
-#   scripts/up.sh            CLUSTER, KUBECONFIG and ROUTER_VALUES may be set
+#   scripts/up.sh            CLUSTER, KUBECONFIG and ROUTER_VALUES may be set;
+#                            ROUTER_EXTRA_VALUES layers a second values file over it
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$ROOT/images.lock"
 CLUSTER="${CLUSTER:-ilg}"
 ROUTER_VALUES="${ROUTER_VALUES:-$ROOT/deploy/router-values.yaml}"
+ROUTER_EXTRA_VALUES="${ROUTER_EXTRA_VALUES:-}"
 say() { printf '== %s\n' "$*"; }
 
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -27,7 +29,7 @@ kubectl apply -f "$ROOT/deploy/model-server.yaml" >/dev/null
 
 say "the llm-d router ($ROUTER_CHART $ROUTER_CHART_VERSION)"
 helm upgrade --install router "$ROUTER_CHART" --version "$ROUTER_CHART_VERSION" \
-  -f "$ROUTER_VALUES" --wait --timeout 5m >/dev/null
+  -f "$ROUTER_VALUES" ${ROUTER_EXTRA_VALUES:+-f "$ROUTER_EXTRA_VALUES"} --wait --timeout 5m >/dev/null
 
 # Empty caches for every test: a restart is the only reset the simulator has.
 kubectl rollout restart deploy/model-server >/dev/null

@@ -10,7 +10,8 @@ cannot fall behind the code unnoticed.
 
     ./tests/plant-violations.py -- <the test command, run inside each copy>
 
-A literal {dir} in the command is replaced by the copy's path.
+A literal {dir} in the command is replaced by the copy's path. PLANTS names
+another table than tests/plants.tsv, for a test with breaks of its own.
 """
 import json
 import os
@@ -38,13 +39,14 @@ def main():
         sys.exit(__doc__)
     cmd = sys.argv[sys.argv.index("--") + 1:]
     plants = []
-    with open(os.path.join(ROOT, "tests", "plants.tsv"), encoding="utf-8") as f:
+    table = os.environ.get("PLANTS", os.path.join("tests", "plants.tsv"))
+    with open(os.path.join(ROOT, table), encoding="utf-8") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
                 continue
             plants.append([json.loads(x) for x in line.rstrip("\n").split("\t")])
     if not plants:
-        sys.exit("tests/plants.tsv has no plants: a test nothing tries to break proves nothing")
+        sys.exit("%s has no plants: a test nothing tries to break proves nothing" % table)
 
     work = copy()
     r = run(cmd, work)

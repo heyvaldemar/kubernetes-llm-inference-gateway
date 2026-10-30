@@ -58,11 +58,36 @@ The reasoning is in three decision records: why the simulator before the GPU ([A
 
 Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the router picking a replica at random, model servers with no prefix cache, an `InferencePool` that selects no model server, a "baseline" that is the router itself, a threshold no honest run can meet, and the chart's own Envoy, a tag with no digest. Each must fail the test.
 
+## When a replica fails
+
+A router that picks the least loaded replica also decides where traffic goes when one of them breaks, and the way it breaks decides which way that goes. A replica that cannot be reached holds on to every request it is given, so it looks busy. A replica that answers every request with an instant error holds none, so it looks idle.
+
+`tests/failure-modes.sh` fails one replica of four in three ways and sends the same open-loop probe through both routes: new single-turn requests on a fixed schedule, as from independent users, whatever happened to the ones before ([ADR 4](docs/decisions/0004-failure-modes-are-recorded-not-gated.md)). Local run on kind, 2026-10-30; the weekly CI run measures again.
+
+| One replica of four | Requests a second | llm-d router v1.0.0 | llm-d main build, `endpoint-health-filter` first | Round-robin Service |
+|---|---|---|---|---|
+| Sick: an instant error for every completion, `/health` fine | 10 | 18 of 80 failed (22%) | 5 of 80 (6%) | 23 of 80 (29%) |
+| | 50 | 184 of 400 (46%) | 5 of 400 (1%) | 119 of 400 (30%) |
+| | 150 | 902 of 1200 (75%) | 0 of 1200 | 288 of 1200 (24%) |
+| Unreachable for 6 s, still Ready | 50 | 1 of 304 stalled or failed | 1 of 305 | 62 of 305, up to 4.2 s |
+| Crashed (SIGKILL), restarted by the kubelet in about a second | 50 | 7 of 400 failed | 5 of 400 | 15 of 400 |
+
+Each router column is its own run; round-robin's numbers are from the v1.0.0 run, and its other run differed by a few points.
+
+**Fast errors look like spare capacity.** At 10 requests a second the router loses what round-robin loses, about a quarter. At 150 it loses three quarters. The healthy replicas are busy, the sick one answers in a millisecond and never is, and token-load scoring ranks it least loaded for nearly every new request. Round-robin stays near a quarter at every rate, because it ignores load in both directions.
+
+**The fix exists, and no release has it.** llm-d's `endpoint-health-filter` ([llm-d/llm-d-router#3326](https://github.com/llm-d/llm-d-router/issues/3326), merged on 2026-10-23, a week after v1.0.0) watches the status of every response: after 5 consecutive 502 or 503 responses it ejects the replica for 30 s, longer each time, up to 5 m. On llm-d's main build, first in the profile ([`deploy/router-health-filter.yaml`](deploy/router-health-filter.yaml)), the sick replica cost the router 5 failed requests before each ejection, whatever the rate. The probe at 10 requests a second ran first and paid for the first ejection, the one at 50 for the second, and at 150 the replica was still out. It is Alpha, so the EPP refuses it without `allow-experimental-plugins`, and it is not in llm-d's optimized-baseline plugins: a router installed from v1.0.0 with these plugins has the first column's numbers.
+
+The unreachable replica is the opposite case. Through the router, 1 of the 304 requests sent while its packets were dropped stalled; that request is in-flight work on the replica, so the ones after it went elsewhere. Round-robin went on handing it a fifth of new requests, each stalled until the packets flowed again.
+
+Without the filter, what ends the sick case is the readiness probe. Both the `InferencePool` and the Service follow the pods' readiness, which turns false after `failureThreshold` failed probes, `periodSeconds` apart, and in the v1.0.0 runs nothing else took the sick replica out. A probe that proves only that the HTTP server answers keeps a replica that fails every completion in the pool, and under load-aware routing the price of that grows with the load.
+
 ## Quickstart
 
 ```bash
 ./scripts/up.sh       # kind, the InferencePool CRD, four model servers, the router
 ./tests/e2e.sh        # the comparison; RESULTS=<dir> keeps each run's JSON
+./tests/failure-modes.sh   # one replica fails three ways, both routes
 ./scripts/run-load.sh router http://router-epp:80 any-seed --sessions 64 --turns 8
 kind delete cluster --name ilg    # teardown
 ```
@@ -76,6 +101,7 @@ Nothing beyond a machine with Docker: the cluster is kind, the model servers are
 ## What it does not do
 
 - **No GPU yet.** The weekly run on an NVIDIA L4 with vLLM and a real model, with cost per million tokens, is the next step; until it exists, nothing here is a claim about a GPU.
+- **Failure handling is measured, not fixed.** The table above is one failing replica of four, on one node. The comparison runs the v1.0.0 router without the health filter, because that is what the release gives; the filter runs only in the failure scenarios.
 - **One router configuration.** llm-d's other paths (precise prefix-cache routing over KV events, prefill/decode disaggregation, predicted-latency routing) are not exercised.
 - **Not production.** It is a reference: it runs on kind, on a laptop or a CI runner, at no cloud cost.
 

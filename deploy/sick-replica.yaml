@@ -1,0 +1,69 @@
+# One model server that fails fast while it looks healthy: every completion is
+# answered at once with an error (the simulator's failure injection), and its
+# /health, and so its readiness, stays fine. A vLLM whose engine has died
+# behind a live API server, or a replica missing what a request needs, answers
+# like this until something takes it out of the pool. It carries the
+# app=model-server label, so the InferencePool and the round-robin Service
+# both send it traffic. Used only by tests/failure-modes.sh, which runs it
+# beside three of the four regular replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-sick
+  labels:
+    app: model-server
+    variant: sick
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-server
+      variant: sick
+  template:
+    metadata:
+      labels:
+        app: model-server
+        variant: sick
+    spec:
+      containers:
+        - name: sim
+          image: ghcr.io/llm-d/llm-d-inference-sim:v1.0.0@sha256:1908c421cbb44130a3212934a0dd1e279dacfe3480be93f4c28b45cd29b93ec8
+          args:
+            - --model=sim/model
+            - --port=8000
+            - --mode=random
+            - --enable-kvcache
+            - --kv-cache-size=1024
+            - --block-size=16
+            - --prefill-overhead=20ms
+            - --prefill-time-per-token=1ms
+            - --inter-token-latency=10ms
+            - --max-num-seqs=8
+            - --max-model-len=8192
+            - --failure-injection-rate=100
+            - --failure-types=server_error
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
