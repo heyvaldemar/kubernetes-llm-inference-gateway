@@ -1,0 +1,325 @@
+name: On a GPU
+
+# ADR 5. The comparison the kind run makes every day, on one NVIDIA L4: the
+# same llm-d router, the same values, the same round-robin Service, the same
+# load and the same thresholds (tests/e2e.sh), in front of four vLLM replicas
+# of a small open model that share the L4 by time-slicing
+# (deploy/gpu/model-server.yaml), on Amazon EKS. Then what an output token
+# costs on each route, at the on-demand price.
+#
+# In the validation account aws-eks-reference-platform set up (its ADR 10),
+# through its creation role, which trusts this repository's aws-validation
+# environment, on main, and nothing else here: GitHub's OIDC token, no stored
+# credential. The account's guardrails, permissions boundary, budgets and $30
+# kill-switch hold this run as they hold that one's. The maintainer approved
+# it weekly (2026-10-28), about $20 a month together with the flagship's AKS
+# leg; a run must stay under MAX_RUN_USD, and the preflight refuses to start
+# one that could cost more if every job ran to its timeout.
+#
+# Weekly on a schedule, and by hand on main. The schedule does nothing until
+# the repository variable AWS_VALIDATION_ENABLED is true. A dispatch creates
+# nothing unless it says SPEND: without it, it runs the preflight alone,
+# which is free. One Terraform state per run, under inference-runs/ in the
+# account's state bucket; the down job destroys it whatever happened, and the
+# next run destroys any state an earlier one left.
+on:
+  schedule:
+    # Sunday: aws-eks-reference-platform runs on Wednesday and the flagship,
+    # whose GPU run shares the account's GPU quota, on Thursday.
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "SPEND creates billed AWS resources, about $0.80 a run; anything else runs the free preflight alone"
+        required: false
+        type: string
+        default: ""
+      max_usd:
+        description: "The most a run may cost, in dollars; the preflight refuses a run that could cost more"
+        required: false
+        type: string
+        default: "1.50"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-run
+  cancel-in-progress: false
+
+env:
+  RUN_ID: ${{ github.run_id }}
+  CLUSTER: reference-platform-inference-${{ github.run_id }}
+  TF_IN_AUTOMATION: "1"
+  TERRAFORM_VERSION: 1.16.5
+  MAX_RUN_USD: ${{ inputs.max_usd || '1.50' }}
+  GPU_TYPE: g6.xlarge
+  NODE_TYPE: m7i.large
+  # eks/variables.tf gpu_disk_gib, and the CPU node's image default.
+  GPU_DISK_GIB: "80"
+  NODE_DISK_GIB: "20"
+  MODEL: Qwen/Qwen2.5-1.5B-Instruct
+
+jobs:
+  preflight:
+    name: Before anything is billed
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.AWS_VALIDATION_ENABLED == 'true'))
+    runs-on: ubuntu-latest
+    environment: aws-validation
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The OIDC token the creation role trusts, for this environment only.
+      id-token: write
+    outputs:
+      spend: ${{ steps.spend.outputs.spend }}
+      gpu_usd: ${{ steps.check.outputs.gpu_usd }}
+      node_usd: ${{ steps.check.outputs.node_usd }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume the creation role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CREATE_ROLE_ARN }}
+          role-session-name: inference-preflight-${{ github.run_id }}
+          role-duration-seconds: 900
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: The trust, the GPU quota, the prices and the most this run can cost
+        id: check
+        run: ./scripts/eks.sh preflight | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Spend or stop here
+        id: spend
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$CONFIRM" = SPEND ]; then
+            echo "spend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The preflight passed; nothing is created without SPEND." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  up:
+    name: Apply, serve, compare
+    needs: preflight
+    if: needs.preflight.outputs.spend == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-validation
+    # scripts/eks.sh preflight reads this and down's timeout to bound the cost.
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      started: ${{ steps.start.outputs.at }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: helm, pinned and checked
+        run: |
+          set -euo pipefail
+          . ./images.lock
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256_AMD64}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          install -m 0755 linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          kubectl version --client
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Assume the creation role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CREATE_ROLE_ARN }}
+          role-session-name: inference-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: What an earlier run left, destroyed first
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: ./scripts/eks.sh sweep
+
+      # The run's variables go to the state bucket beside its state, so the
+      # down job, and a later run's sweep, destroy exactly what this job
+      # applied.
+      - name: The run's variables
+        env:
+          BOUNDARY: ${{ vars.IAM_PERMISSIONS_BOUNDARY }}
+          BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')"
+          python3 -I - "$ip" > run.tfvars.json <<'PY'
+          import json, os, sys
+          print(json.dumps({
+              "run_id": os.environ["RUN_ID"],
+              "cluster_name": os.environ["CLUSTER"],
+              "iam_permissions_boundary": os.environ["BOUNDARY"],
+              "operator_cidrs": [sys.argv[1] + "/32"],
+              "node_instance_type": os.environ["NODE_TYPE"],
+              "gpu_instance_type": os.environ["GPU_TYPE"],
+              "gpu_disk_gib": int(os.environ["GPU_DISK_GIB"]),
+          }, indent=1))
+          PY
+          aws s3 cp run.tfvars.json "s3://$BUCKET/inference-runs/$RUN_ID.tfvars.json"
+
+      - name: Terraform init, one state per run
+        env:
+          BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > eks/ci_backend.tf
+          terraform -chdir=eks init -input=false -lockfile=readonly \
+            -backend-config="bucket=$BUCKET" -backend-config="key=inference-runs/$RUN_ID.tfstate" \
+            -backend-config="region=$REGION" -backend-config="use_lockfile=true"
+
+      # From here the run is billed: the cost table counts from this clock.
+      - name: Start the clock
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Apply
+        timeout-minutes: 30
+        run: terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
+
+      - name: The cluster, from the runner's address
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER" >/dev/null
+          kubectl wait nodes --all --for=condition=Ready --timeout=600s
+          kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+          kubectl get nodes -L node.kubernetes.io/instance-type,topology.kubernetes.io/zone
+
+      - name: The L4, offered as four
+        run: ./scripts/eks.sh gpu
+
+      # The same script the kind run uses, on this cluster as it is, with
+      # the vLLM servers in place of the simulators. Each of the four starts
+      # after the one before it is ready; the first fetches the weights.
+      - name: Up
+        env:
+          USE_KIND: "0"
+          MODEL_SERVERS: deploy/gpu/model-server.yaml
+          MODEL_SERVER_WORKLOAD: statefulset/model-server
+          ROLLOUT_TIMEOUT: 1200s
+        run: ./scripts/up.sh
+
+      - name: Four replicas on one L4, each with the pinned weights
+        env:
+          RESULTS: ${{ runner.temp }}/results
+        run: ./scripts/eks.sh check | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The comparison
+        env:
+          RESULTS: ${{ runner.temp }}/results
+        run: ./tests/e2e.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: What an output token costs, on each route
+        if: always() && steps.start.outputs.at != ''
+        env:
+          RESULTS: ${{ runner.temp }}/results
+          GPU_USD: ${{ needs.preflight.outputs.gpu_usd }}
+          NODE_USD: ${{ needs.preflight.outputs.node_usd }}
+        run: ./scripts/eks.sh tokens | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: What the cluster looked like
+        if: failure() && steps.start.outputs.at != ''
+        run: ./scripts/eks.sh diagnose
+
+      - name: Keep the measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: results-gpu
+          path: ${{ runner.temp }}/results/
+          retention-days: 90
+          if-no-files-found: ignore
+
+  down:
+    name: Destroy, look for residue, report the cost
+    needs: [preflight, up]
+    # Whatever happened to the run, once the preflight said to spend.
+    if: always() && needs.preflight.outputs.spend == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-validation
+    # scripts/eks.sh preflight reads this and up's timeout to bound the cost.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Assume the creation role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CREATE_ROLE_ARN }}
+          role-session-name: inference-down-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: The run's variables and state
+        id: state
+        env:
+          BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          if ! aws s3 cp "s3://$BUCKET/inference-runs/$RUN_ID.tfvars.json" run.tfvars.json; then
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            echo "the run wrote no variables: nothing was applied"
+            exit 0
+          fi
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+          printf 'terraform {\n  backend "s3" {}\n}\n' > eks/ci_backend.tf
+          terraform -chdir=eks init -input=false -lockfile=readonly \
+            -backend-config="bucket=$BUCKET" -backend-config="key=inference-runs/$RUN_ID.tfstate" \
+            -backend-config="region=$REGION" -backend-config="use_lockfile=true"
+
+      # Twice if the first fails: a node group or an ENI the CNI still holds
+      # can outlast one attempt.
+      - name: Destroy
+        id: destroy
+        if: steps.state.outputs.applied == 'true'
+        run: |
+          terraform -chdir=eks destroy -input=false -auto-approve -var-file="$PWD/run.tfvars.json" \
+            || { sleep 60; terraform -chdir=eks destroy -input=false -auto-approve -var-file="$PWD/run.tfvars.json"; }
+
+      - name: When the destroy failed, no node left billing
+        if: failure() && steps.state.outputs.applied == 'true'
+        run: ./scripts/eks.sh stop
+
+      - name: Nothing left behind
+        if: always() && steps.state.outputs.applied == 'true'
+        run: ./scripts/eks.sh residue
+
+      - name: What the run cost
+        if: always() && needs.up.outputs.started != ''
+        env:
+          STARTED: ${{ needs.up.outputs.started }}
+          GPU_USD: ${{ needs.preflight.outputs.gpu_usd }}
+          NODE_USD: ${{ needs.preflight.outputs.node_usd }}
+        run: |
+          set -o pipefail
+          ./scripts/eks.sh cost | tee -a "$GITHUB_STEP_SUMMARY"

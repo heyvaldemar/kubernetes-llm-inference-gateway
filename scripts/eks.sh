@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+# eks.sh <preflight|sweep|gpu|check|tokens|diagnose|stop|residue|cost> - the
+# parts of the GPU run (ADR 5) that are not Terraform and not the comparison.
+# .github/workflows/gpu.yml calls them; each reads the environment it sets:
+# AWS_REGION, TF_STATE_BUCKET, CLUSTER (the run's cluster name), RUN_ID.
+#
+#   preflight  before anything is billed: the role this run assumed, that its
+#              trust names this repository, the account's GPU quota against
+#              what already runs, the on-demand prices from AWS's price list,
+#              and the most the run could cost if every job ran to its
+#              timeout, which must stay within MAX_RUN_USD
+#   sweep      destroy what an earlier run of this workflow left: any state
+#              under inference-runs/ older than three hours that still holds
+#              resources
+#   gpu        NVIDIA's device plugin, and the GPU node offering its L4 as four
+#   check      after scripts/up.sh: four model servers, all on the GPU node,
+#              all on the same L4, each serving the pinned model with weights
+#              that matched their digests
+#   tokens     what each route's output tokens cost, from the e2e's results
+#              and the prices preflight read
+#   diagnose   what the cluster looked like, when a step failed
+#   stop       when a destroy failed: the node groups deleted and any instance
+#              of the run terminated by the AWS CLI, so nothing bills while a
+#              person looks
+#   residue    after the destroy, anything still tagged with the run's
+#              cluster, or with any earlier run of this project: none is the
+#              only passing answer
+#   cost       what the run cost, from each instance's own launch and
+#              termination, and the control plane from apply to destroy
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PREFIX=inference-runs
+PROJECT=kubernetes-llm-inference-gateway
+TAG=inference.heyvaldemar.com
+GPU_LABEL="$TAG/accelerator=nvidia"
+# The prices the price list does not carry per instance type, us-east-1: the
+# EKS control plane on standard support, a public IPv4 address, and gp3
+# storage a GB-month. The nodes' prices are read from the price list.
+EKS_USD_PER_HOUR=0.10
+IPV4_USD_PER_HOUR=0.005
+GP3_USD_PER_GB_MONTH=0.08
+say() { printf '== %s\n' "$*"; }
+
+# price <instance type>: its on-demand Linux price an hour in the region,
+# from the AWS Price List API (whose endpoint is in us-east-1).
+price() {
+  aws pricing get-products --region us-east-1 --service-code AmazonEC2 \
+    --filters "Type=TERM_MATCH,Field=instanceType,Value=$1" "Type=TERM_MATCH,Field=regionCode,Value=$AWS_REGION" \
+      "Type=TERM_MATCH,Field=operatingSystem,Value=Linux" "Type=TERM_MATCH,Field=tenancy,Value=Shared" \
+      "Type=TERM_MATCH,Field=preInstalledSw,Value=NA" "Type=TERM_MATCH,Field=capacitystatus,Value=Used" \
+      "Type=TERM_MATCH,Field=licenseModel,Value=No License required" \
+    --query PriceList --output json | python3 -I -c '
+import json, sys
+prices = set()
+for product in json.load(sys.stdin):
+    for term in json.loads(product).get("terms", {}).get("OnDemand", {}).values():
+        for d in term["priceDimensions"].values():
+            if d.get("unit") == "Hrs":
+                prices.add(float(d["pricePerUnit"]["USD"]))
+if len(prices) != 1:
+    sys.exit("%s: the price list gave %s on-demand prices, not one" % (sys.argv[1], sorted(prices) or "no"))
+print(prices.pop())' "$1"
+}
+
+case "${1:-}" in
+  preflight)
+    : "${AWS_REGION:?}" "${MAX_RUN_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}"
+    arn="$(aws sts get-caller-identity --query Arn --output text)"
+    role="${arn#*:assumed-role/}"; role="${role%%/*}"
+    say "assumed $role through GitHub's OIDC token"
+    # The subject GitHub writes into this environment's token, in its
+    # immutable form, which the role's trust must name.
+    subject="repo:${GITHUB_REPOSITORY_OWNER:?}@${GITHUB_REPOSITORY_OWNER_ID:?}/${GITHUB_REPOSITORY#*/}@${GITHUB_REPOSITORY_ID:?}:environment:aws-validation"
+    aws iam get-role --role-name "$role" --query Role.AssumeRolePolicyDocument --output json | python3 -I -c '
+import json, sys
+doc, mine = json.load(sys.stdin), sys.argv[1]
+subs = []
+for s in doc["Statement"]:
+    for cond in s.get("Condition", {}).values():
+        for k, v in cond.items():
+            if k.endswith(":sub"):
+                subs += v if isinstance(v, list) else [v]
+if mine not in subs:
+    sys.exit("the role trusts %d subjects and not %s" % (len(subs), mine))
+print("== its trust names %s, one of %d subjects" % (mine, len(subs)))' "$subject"
+
+    # GPU and VT instances share one quota of vCPUs in the region, and the
+    # flagship's weekly GPU run uses it too.
+    quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code L-DB2E81BA --query Quota.Value --output text)"
+    vcpus() { aws ec2 describe-instance-types --instance-types "$@" --query 'InstanceTypes[].[InstanceType, VCpuInfo.DefaultVCpus]' --output text; }
+    need="$(vcpus "$GPU_TYPE" | awk '{print $2}')"
+    running="$(aws ec2 describe-instances --filters Name=instance-state-name,Values=pending,running \
+                 --query 'Reservations[].Instances[].InstanceType' --output text | tr '\t' '\n' | grep -E '^(g|vt)[0-9]' || true)"
+    used=0
+    if [ -n "$running" ]; then
+      # shellcheck disable=SC2046 # one argument per running type
+      used="$(vcpus $(sort -u <<<"$running") | awk 'NR==FNR {v[$1] = $2; next} {s += v[$1]} END {print s + 0}' - <(echo "$running"))"
+    fi
+    say "G and VT quota: ${quota%.*} vCPUs; running now: $used; this run needs $need ($GPU_TYPE)"
+    if [ "$(( ${quota%.*} - used ))" -lt "$need" ]; then
+      echo "the GPU quota is in use (${running//$'\n'/ }): another run, the flagship's on its day, holds it; nothing was created" >&2
+      exit 1
+    fi
+
+    gpu_usd="$(price "$GPU_TYPE")"; node_usd="$(price "$NODE_TYPE")"
+    # The most the run can cost: every hourly price for as long as the two
+    # billed jobs' timeouts allow, read from the workflow itself.
+    python3 -I - "$ROOT/.github/workflows/gpu.yml" "$gpu_usd" "$node_usd" "$GPU_DISK_GIB" "$NODE_DISK_GIB" "$MAX_RUN_USD" \
+      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "${GITHUB_OUTPUT:-/dev/null}" "$GPU_TYPE" "$NODE_TYPE" <<'PY'
+import re, sys
+wf, gpu, node, gpu_disk, node_disk, cap, eks, ipv4, gp3, out, gpu_type, node_type = sys.argv[1:]
+gpu, node, cap, eks, ipv4, gp3 = map(float, (gpu, node, cap, eks, ipv4, gp3))
+text = open(wf).read()
+def timeout(job):
+    m = re.search(r"^  %s:\n(?:    .*\n|\s*\n)*?    timeout-minutes: (\d+)" % job, text, re.M)
+    if not m:
+        sys.exit("gpu.yml: no timeout-minutes for job %s" % job)
+    return int(m.group(1))
+minutes = timeout("up") + timeout("down")
+hourly = eks + gpu + node + 2 * ipv4 + (int(gpu_disk) + int(node_disk)) * gp3 / 730
+worst = hourly * minutes / 60
+print("== on-demand an hour, from the AWS price list: %s $%.4f, %s $%.4f; with the control plane, two addresses and the disks $%.4f"
+      % (gpu_type, gpu, node_type, node, hourly))
+print("== the most this run can cost: %d minutes of jobs at $%.4f an hour, $%.2f, against a cap of $%.2f" % (minutes, hourly, worst, cap))
+with open(out, "a") as f:
+    f.write("gpu_usd=%s\nnode_usd=%s\nworst_usd=%.2f\n" % (gpu, node, worst))
+if worst > cap:
+    sys.exit("the run could cost $%.2f, more than $%.2f: shorten a timeout or raise the cap" % (worst, cap))
+PY
+    ;;
+
+  sweep)
+    : "${TF_STATE_BUCKET:?}" "${AWS_REGION:?}"
+    now=$(date +%s); swept=0
+    # shellcheck disable=SC2016  # the backticks are JMESPath's, not the shell's
+    for key in $(aws s3api list-objects-v2 --bucket "$TF_STATE_BUCKET" --prefix "$PREFIX/" \
+                   --query 'Contents[?ends_with(Key, `.tfstate`)].Key' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true); do
+      run="$(basename "$key" .tfstate)"
+      [ "$run" = "${RUN_ID:-}" ] && continue
+      modified="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$key" --query LastModified --output text)"
+      age_h=$(( (now - $(date -d "$modified" +%s)) / 3600 ))
+      left="$(aws s3 cp "s3://$TF_STATE_BUCKET/$key" - | python3 -I -c 'import json,sys; print(sum(len(r.get("instances", [])) for r in json.load(sys.stdin).get("resources", []) if r.get("mode") == "managed"))')"
+      [ "$left" = 0 ] && continue
+      if [ "$age_h" -lt 3 ]; then say "run $run: $left resources, $age_h h old: still inside its run"; continue; fi
+      say "run $run: $left resources left for $age_h h: destroying"
+      work="$(mktemp -d)"
+      aws s3 cp --quiet "s3://$TF_STATE_BUCKET/$PREFIX/$run.tfvars.json" "$work/run.tfvars.json"
+      mkdir -p "$work/tf" && cp -r "$ROOT/eks/." "$work/tf/"
+      rm -rf "$work/tf/.terraform" "$work/tf/tests"
+      printf 'terraform {\n  backend "s3" {}\n}\n' >"$work/tf/ci_backend.tf"
+      terraform -chdir="$work/tf" init -input=false -lockfile=readonly -backend-config="bucket=$TF_STATE_BUCKET" \
+        -backend-config="key=$key" -backend-config="region=$AWS_REGION" -backend-config="use_lockfile=true" >/dev/null
+      terraform -chdir="$work/tf" destroy -input=false -auto-approve -var-file="$work/run.tfvars.json" \
+        -var 'operator_cidrs=["198.51.100.1/32"]' >/dev/null
+      say "run $run: destroyed"; swept=$((swept + 1))
+    done
+    say "swept $swept earlier run(s)"
+    ;;
+
+  gpu)
+    kubectl apply -f "$ROOT/deploy/gpu/device-plugin.yaml" >/dev/null
+    kubectl -n kube-system rollout status ds/nvidia-device-plugin --timeout=300s >/dev/null
+    offered=""
+    for _ in $(seq 1 60); do
+      offered="$(kubectl get nodes -l "$GPU_LABEL" -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}')"
+      [ "$offered" = 4 ] && break
+      sleep 5
+    done
+    [ "$offered" = 4 ] || { echo "the GPU node offers '${offered:-nothing}' nvidia.com/gpu, not 4" >&2; exit 1; }
+    say "the GPU node offers its one L4 to the scheduler as 4 nvidia.com/gpu, by time-slicing"
+    ;;
+
+  check)
+    : "${MODEL:?}" "${RESULTS:?}"
+    mkdir -p "$RESULTS"
+    nodes="$(kubectl get nodes -l "$GPU_LABEL" -o jsonpath='{.items[*].metadata.name}')"
+    [ "$(wc -w <<<"$nodes")" -eq 1 ] || { echo "expected one GPU node, found: ${nodes:-none}" >&2; exit 1; }
+    fail=0
+    rows=""
+    for pod in $(kubectl get pods -l app=model-server -o jsonpath='{.items[*].metadata.name}'); do
+      on="$(kubectl get pod "$pod" -o jsonpath='{.spec.nodeName}')"
+      [ "$on" = "$nodes" ] || { echo "FAIL: $pod runs on $on, not the GPU node" >&2; fail=1; }
+      gpu="$(kubectl exec "$pod" -c vllm -- nvidia-smi --query-gpu=uuid,name,memory.used,memory.total,driver_version --format=csv,noheader,nounits)"
+      weights="$(kubectl logs "$pod" -c weights)"
+      if grep -q '^BAD' <<<"$weights" || [ "$(grep -c '^ok ' <<<"$weights")" -ne "$(kubectl get configmap model-files -o jsonpath='{.data.sha256}' | grep -c .)" ]; then
+        echo "FAIL: $pod: its weights were not all checked against their digests" >&2; fail=1
+      fi
+      served="$(kubectl get --raw "/api/v1/namespaces/default/pods/$pod:8000/proxy/v1/models" | python3 -I -c 'import json,sys; print(" ".join(m["id"] for m in json.load(sys.stdin)["data"]))')"
+      [ "$served" = "$MODEL" ] || { echo "FAIL: $pod serves '$served', not $MODEL" >&2; fail=1; }
+      rows="$rows$pod, $gpu"$'\n'
+    done
+    python3 -I - "$rows" "$RESULTS/gpu.json" "$MODEL" <<'PY' || fail=1
+import json, sys
+rows = [[c.strip() for c in r.split(",")] for r in sys.argv[1].splitlines() if r.strip()]
+bad = 0
+if len(rows) != 4:
+    print("FAIL: %d model servers, not four" % len(rows)); bad = 1
+uuids = {r[1] for r in rows}
+if len(uuids) != 1:
+    print("FAIL: the model servers are on %d GPUs, not one shared" % len(uuids)); bad = 1
+pod, uuid, name, used, total, driver = rows[0]
+print("OK: %d model servers serving %s, all on one %s (driver %s), which holds %s of %s MiB"
+      % (len(rows), sys.argv[3], name, driver, used, total))
+json.dump({"gpu": name, "driver": driver, "memory_used_mib": int(used), "memory_total_mib": int(total),
+           "replicas": len(rows), "model": sys.argv[3]}, open(sys.argv[2], "w"))
+sys.exit(bad)
+PY
+    [ "$fail" -eq 0 ] || exit 1
+    ;;
+
+  tokens)
+    : "${RESULTS:?}" "${GPU_USD:?}" "${NODE_USD:?}" "${GPU_TYPE:?}"
+    python3 -I - "$RESULTS" "$GPU_USD" "$NODE_USD" "$EKS_USD_PER_HOUR" "$GPU_TYPE" <<'PY'
+import glob, json, os, sys
+d, gpu, node, eks, gpu_type = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+cluster = gpu + node + eks
+out = {"gpu_usd_per_hour": gpu, "cluster_usd_per_hour": round(cluster, 4), "routes": {}}
+print("| Route | Runs | Requests | Output tokens | Prompt tokens | In cache | Wall time | Output tokens/s "
+      "| A million output tokens, the %s alone | With the CPU node and the control plane |" % gpu_type)
+print("|---|---|---|---|---|---|---|---|---|---|")
+for route, name in (("roundrobin", "Round-robin Service"), ("router", "llm-d router")):
+    runs = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(d, route + "-*.json")))]
+    if not runs or any(r.get("output_tokens") is None for r in runs):
+        sys.exit("%s: no runs with token counts in %s" % (route, d))
+    wall = sum(r["wall_s"] for r in runs)
+    o = sum(r["output_tokens"] for r in runs)
+    i = sum(r["prompt_tokens"] for r in runs)
+    hits = [r["cache_hit_rate"] for r in runs]
+    rate = o / wall
+    per_m = lambda usd: usd / (rate * 3600) * 1e6
+    out["routes"][route] = {"runs": len(runs), "requests": sum(r["requests"] for r in runs), "output_tokens": o,
+                            "prompt_tokens": i, "wall_s": round(wall, 2), "output_tokens_per_s": round(rate, 1),
+                            "usd_per_million_output_tokens_gpu": round(per_m(gpu), 3),
+                            "usd_per_million_output_tokens_cluster": round(per_m(cluster), 3),
+                            "cache_hit_rate": hits}
+    print("| %s | %d | %d | %d | %d | %s | %.1f s | %.1f | $%.2f | $%.2f |" % (
+        name, len(runs), out["routes"][route]["requests"], o, i, " / ".join("%.0f%%" % (100 * h) for h in hits),
+        wall, rate, per_m(gpu), per_m(cluster)))
+json.dump(out, open(os.path.join(d, "cost-per-token.json"), "w"), indent=1)
+PY
+    ;;
+
+  diagnose)
+    kubectl get nodes -o wide -L "$TAG/accelerator" || true
+    kubectl get pods -A -o wide || true
+    kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
+    kubectl -n kube-system logs ds/nvidia-device-plugin --tail=30 || true
+    for pod in $(kubectl get pods -l app=model-server -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+      echo "--- $pod"
+      kubectl get pod "$pod" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}{range .status.containerStatuses[*]}{.name}: {.state} last {.lastState}{"\n"}{end}' || true
+      kubectl logs "$pod" -c weights --tail=12 || true
+      kubectl logs "$pod" -c vllm --tail=60 || true
+    done
+    kubectl logs deploy/router-epp --tail=40 --all-containers || true
+    ;;
+
+  stop)
+    : "${CLUSTER:?}" "${AWS_REGION:?}"
+    groups="$(aws eks list-nodegroups --cluster-name "$CLUSTER" --query nodegroups --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true)"
+    for g in $groups; do aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$g" >/dev/null && say "deleting node group $g"; done
+    for g in $groups; do aws eks wait nodegroup-deleted --cluster-name "$CLUSTER" --nodegroup-name "$g" || true; done
+    ids="$(aws ec2 describe-instances --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" Name=instance-state-name,Values=pending,running,stopping,stopped \
+             --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' ' ')"
+    if [ -n "${ids// /}" ]; then
+      # shellcheck disable=SC2086 # one argument per instance
+      aws ec2 terminate-instances --instance-ids $ids >/dev/null && say "terminated $ids"
+    fi
+    say "no node of $CLUSTER is left running; the rest waits for the next run's sweep"
+    ;;
+
+  residue)
+    : "${CLUSTER:?}" "${AWS_REGION:?}"
+    # exists <arn>: the tagging API keeps a deleted resource's tags for a
+    # while; a resource it lists is asked about directly before it counts.
+    exists() {
+      local id="${1##*/}"
+      case "$1" in
+        *:vpc/*) aws ec2 describe-vpcs --vpc-ids "$id" >/dev/null 2>&1 ;;
+        *:subnet/*) aws ec2 describe-subnets --subnet-ids "$id" >/dev/null 2>&1 ;;
+        *:route-table/*) aws ec2 describe-route-tables --route-table-ids "$id" >/dev/null 2>&1 ;;
+        *:internet-gateway/*) aws ec2 describe-internet-gateways --internet-gateway-ids "$id" >/dev/null 2>&1 ;;
+        *:security-group/*) aws ec2 describe-security-groups --group-ids "$id" >/dev/null 2>&1 ;;
+        *:launch-template/*) aws ec2 describe-launch-templates --launch-template-ids "$id" >/dev/null 2>&1 ;;
+        *:volume/*) aws ec2 describe-volumes --volume-ids "$id" >/dev/null 2>&1 ;;
+        *:instance/*) [ "$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != terminated ] \
+                        && aws ec2 describe-instances --instance-ids "$id" >/dev/null 2>&1 ;;
+        *) true ;;
+      esac
+    }
+    really="" elsewhere="" gone=0
+    # shellcheck disable=SC2016 # the backticks are JMESPath's, not the shell's
+    while read -r arn owner; do
+      [ -n "$arn" ] || continue
+      if ! exists "$arn"; then gone=$((gone + 1)); continue; fi
+      if [ "$owner" = "$CLUSTER" ]; then really="$really $arn"; else elsewhere="$elsewhere $arn ($owner)"; fi
+    done < <(aws resourcegroupstaggingapi get-resources --tag-filters "Key=$TAG/project,Values=$PROJECT" "Key=$TAG/cluster" \
+               --query "ResourceTagMappingList[].[ResourceARN, Tags[?Key=='$TAG/cluster'] | [0].Value]" --output text || true)
+    roles="$(aws iam list-roles --query "Roles[?starts_with(RoleName, 'reference-platform-inference-')].RoleName" --output text | tr '\t' '\n' | grep -v '^$' || true)"
+    cluster="$(aws eks list-clusters --query "clusters[?starts_with(@, 'reference-platform-inference-')]" --output text | tr '\t' ' ')"
+    [ "$gone" -gt 0 ] && say "the tagging API still lists $gone resource(s) that no longer exist"
+    if [ -z "${really// /}" ] && [ -z "${elsewhere// /}" ] && [ -z "$roles" ] && [ -z "${cluster// /}" ]; then
+      say "nothing left of $CLUSTER, and nothing of any earlier run"; exit 0
+    fi
+    echo "left behind: clusters '${cluster:-none}'; roles: ${roles//$'\n'/ }; this run's tagged:${really:- none}; earlier runs':${elsewhere:- none}" >&2
+    exit 1
+    ;;
+
+  cost)
+    : "${CLUSTER:?}" "${STARTED:?}" "${GPU_USD:?}" "${NODE_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}" "${MAX_RUN_USD:?}"
+    instances="$(aws ec2 describe-instances --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
+      --query 'Reservations[].Instances[].[InstanceType, LaunchTime, State.Name, StateTransitionReason]' --output json)"
+    python3 -I - "$instances" "$STARTED" "$(date +%s)" "$GPU_TYPE" "$GPU_USD" "$NODE_TYPE" "$NODE_USD" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
+      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "$MAX_RUN_USD" <<'PY'
+import datetime as dt, json, re, sys
+instances = json.loads(sys.argv[1])
+started, now = int(sys.argv[2]), int(sys.argv[3])
+gpu_type, gpu, node_type, node = sys.argv[4], float(sys.argv[5]), sys.argv[6], float(sys.argv[7])
+disk = {gpu_type: int(sys.argv[8]), node_type: int(sys.argv[9])}
+price = {gpu_type: gpu, node_type: node}
+eks, ipv4, gp3, cap = map(float, sys.argv[10:14])
+def epoch(s):
+    return int(dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+rows = [("EKS control plane, from the apply to the end of the destroy", eks, (now - started) / 3600)]
+for itype, launched, state, reason in instances:
+    # EC2 bills an instance by the second from its launch to its termination,
+    # which it records as "User initiated (YYYY-MM-DD HH:MM:SS GMT)".
+    m = re.search(r"\((\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) GMT\)", reason or "")
+    end = epoch(m.group(1).replace(" ", "T") + "Z") if state == "terminated" and m else now
+    h = max(end - epoch(launched), 60) / 3600
+    rows.append(("one %s, %s, %.2f h" % (itype, state, h), price[itype], h))
+    rows.append(("its public IPv4 address and %d GiB gp3" % disk[itype], ipv4 + disk[itype] * gp3 / 730, h))
+total = sum(r * h for _, r, h in rows)
+print("| What | Per hour | This run |\n|---|---|---|")
+for what, rate, h in rows:
+    print("| %s | $%.4f | $%.2f |" % (what, rate, rate * h))
+print("| **Total, %.2f h, at on-demand prices** | | **about $%.2f** |" % ((now - started) / 3600, total))
+if total > cap:
+    sys.exit("the run cost about $%.2f, more than the $%.2f it is allowed" % (total, cap))
+PY
+    ;;
+
+  *) echo "usage: eks.sh <preflight|sweep|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
+esac

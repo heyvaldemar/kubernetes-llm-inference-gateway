@@ -1,0 +1,198 @@
+# The GPU run's model servers (ADR 5): four vLLM v0.32.0 replicas of
+# Qwen2.5-1.5B-Instruct on one NVIDIA L4, each with a fifth of its memory and
+# a prefix cache of its own, in place of the four simulators of
+# deploy/model-server.yaml. Same label, same port, same metrics, same
+# round-robin Service, so the router, the load and the checks are the ones
+# the kind run uses.
+#
+# The weights come from Hugging Face at one commit of the model's
+# repository, and every file vLLM reads is checked against the digest below
+# before the server starts; a file that differs stops the pod. They are
+# fetched once into the node's disk, by the first replica, and checked again
+# by each.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-files
+data:
+  repository: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  # sha256 of every file the server reads, at that revision.
+  sha256: |
+    832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e  LICENSE
+    98d2ff8cc47488d08a2b0b3acf4eb99ef210779b42bd48605f6b8e36acdbf670  config.json
+    e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6  generation_config.json
+    599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3  merges.txt
+    dd924a11b4c220f385b51ffa522daea7c9f3d850e31b162bb5661df483c6d3ee  model.safetensors
+    c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539  tokenizer.json
+    5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583  tokenizer_config.json
+    ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  vocab.json
+  fetch.py: |
+    # Fetch each pinned file that is missing or differs, then check them all.
+    import hashlib, os, sys
+    from huggingface_hub import hf_hub_download
+    files = "/model-files"
+    repo = open(f"{files}/repository").read().strip()
+    rev = open(f"{files}/revision").read().strip()
+    # The path the server is given: deploy/gpu/model-server.yaml, args.
+    out = f"/models/{repo.split('/')[-1]}-{rev[:12]}"
+    def sha256(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    bad = 0
+    for line in open(f"{files}/sha256").read().split("\n"):
+        if not line.strip():
+            continue
+        want, name = line.split()
+        path = os.path.join(out, name)
+        if not os.path.exists(path) or sha256(path) != want:
+            # A file on disk that differs is fetched again, not trusted to
+            # the download's own record of it.
+            hf_hub_download(repo, name, revision=rev, local_dir=out, force_download=os.path.exists(path))
+        got = sha256(path)
+        print(f"{'ok ' if got == want else 'BAD'} {name} sha256:{got}", flush=True)
+        bad += got != want
+    sys.exit(f"{bad} file(s) differ from the pinned digests" if bad else 0)
+---
+# What each replica answers on, for the round-robin baseline and for the
+# router's InferencePool, which selects the same label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-roundrobin
+spec:
+  selector:
+    app: model-server
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server
+spec:
+  clusterIP: None
+  selector:
+    app: model-server
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# A StatefulSet so the replicas start one at a time: vLLM sizes its KV cache
+# from the GPU memory it finds free at start, and four starting at once on
+# one GPU each count the others' allocations as their own.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: model-server
+  labels:
+    app: model-server
+spec:
+  replicas: 4
+  serviceName: model-server
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: model-server
+  template:
+    metadata:
+      labels:
+        app: model-server
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      nodeSelector:
+        inference.heyvaldemar.com/accelerator: nvidia
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+      initContainers:
+        # Root only to write the node's directory the four replicas share;
+        # the server itself runs as nobody in particular, read-only.
+        - name: weights
+          image: docker.io/vllm/vllm-openai:v0.32.0-x86_64-zstd@sha256:9aa9a68bd05030a676652ebd41221263748acd055ff9f0f223d4b9e710d98b67
+          command: ["python3", "-I", "/model-files/fetch.py"]
+          env:
+            - {name: HF_HOME, value: /tmp/hf}
+            - {name: HF_HUB_DISABLE_TELEMETRY, value: "1"}
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 3Gi}
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: model-files, mountPath: /model-files, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: vllm
+          image: docker.io/vllm/vllm-openai:v0.32.0-x86_64-zstd@sha256:9aa9a68bd05030a676652ebd41221263748acd055ff9f0f223d4b9e710d98b67
+          # The image's entrypoint is `vllm serve`.
+          args:
+            - /models/Qwen2.5-1.5B-Instruct-989aa7980e4c
+            - --served-model-name=Qwen/Qwen2.5-1.5B-Instruct
+            - --port=8000
+            # A fifth of the L4 each: the weights (2.9 GiB), the CUDA
+            # context and graphs, and the KV cache in what is left.
+            - --gpu-memory-utilization=0.2
+            # The simulators' context window, for the same conversations.
+            - --max-model-len=8192
+            - --max-num-seqs=16
+            - --enable-prefix-caching
+          env:
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: VLLM_NO_USAGE_STATS, value: "1"}
+            - {name: DO_NOT_TRACK, value: "1"}
+            # Compile caches and everything else vLLM writes go under HOME.
+            # The image has no user 1000, so the name torch's compile cache
+            # asks for comes from USER, not from /etc/passwd.
+            - {name: HOME, value: /cache}
+            - {name: USER, value: vllm}
+            - {name: TORCHINDUCTOR_CACHE_DIR, value: /cache/inductor}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 2
+          # Four of these fill the g6.xlarge's four vCPUs and most of its
+          # 16 GiB; they start one at a time, so their start-up peaks do not
+          # meet.
+          resources:
+            requests: {cpu: 900m, memory: 2560Mi}
+            limits: {memory: 5Gi, nvidia.com/gpu: 1}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+            - {name: cache, mountPath: /cache}
+            - {name: tmp, mountPath: /tmp}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          hostPath: {path: /var/lib/inference-models, type: DirectoryOrCreate}
+        - name: model-files
+          configMap: {name: model-files}
+        - name: cache
+          emptyDir: {sizeLimit: 4Gi}
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}

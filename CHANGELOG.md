@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The comparison on a GPU** (`.github/workflows/gpu.yml`, ADR 5): the same router, values, load, round-robin Service and thresholds as the kind run, on Amazon EKS, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing, and what a million output tokens cost on each route at the on-demand price. Weekly behind `AWS_VALIDATION_ENABLED`, and by hand.
+- **A preflight before anything is billed**: the creation role's trust, the account's GPU quota against what already runs, the prices from the AWS Price List API, and the most the run could cost if every billed job ran to its timeout, refused above $1.50. Then destroy, a residue check, and the cost from each instance's own launch and termination (`scripts/eks.sh`).
+- **The model's weights pinned file by file**: a commit of its Hugging Face repository and the sha256 of every file the server reads, checked in each pod before vLLM starts (`deploy/gpu/model-server.yaml`).
+- **The GPU run's Terraform** (`eks/`), checked on a plan against a mocked AWS provider on every push, its tests shown five breaks (`eks/tests/plants.tsv`).
+- **ADR 5**: the same comparison on one L4, shared by four vLLM replicas.
+
+### Changed
+
+- `scripts/run-load.sh` adds the prompt and output tokens the model servers counted, and reads every metric by its exact name (vLLM also exports `vllm:prompt_tokens_cached_total`).
+- `scripts/up.sh` takes `USE_KIND=0` for a cluster it did not make, `MODEL_SERVERS` and `MODEL_SERVER_WORKLOAD` for other model servers, and `ROLLOUT_TIMEOUT`; it restarts the model servers only when they existed before, since new ones have served nothing.
+- `tests/e2e.sh` takes `MODEL`, the model the servers serve.
+
 ## [1.1.0] - 2026-10-30
 
 ### Added

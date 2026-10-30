@@ -39,6 +39,34 @@ jobs:
       - name: The load generator compiles
         run: python3 -I -m py_compile loadgen/loadgen.py loadgen/probe.py tests/plant-violations.py
 
+  # The GPU run's Terraform (ADR 5), checked on a plan against a mocked AWS
+  # provider, and its tests shown the breaks they exist for
+  # (eks/tests/plants.tsv). No account, no credential, no cost: the run
+  # itself is gpu.yml.
+  terraform:
+    name: The GPU run's Terraform, on a plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+
+      - name: Format, validate, test
+        run: |
+          terraform -chdir=eks fmt -check -recursive -diff
+          terraform -chdir=eks init -backend=false -input=false -lockfile=readonly
+          terraform -chdir=eks validate
+          terraform -chdir=eks test
+
+      - name: The tests, shown each break they exist for
+        run: PLANTS=eks/tests/plants.tsv python3 -I -u tests/plant-violations.py -- terraform -chdir=eks test | tee -a "$GITHUB_STEP_SUMMARY"
+
   e2e:
     name: Prefix-aware routing against round-robin
     runs-on: ubuntu-latest

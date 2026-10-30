@@ -5,6 +5,11 @@ EPP_IMAGE=ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0@sha256:024188e998f51
 # (deploy/router-health-filter.yaml, tests/failure-modes.sh only).
 EPP_MAIN_IMAGE=ghcr.io/llm-d/llm-d-router-endpoint-picker:main@sha256:7d22d0013c05584fa723284c63b5c67d285d2168861d3093d57e12a682defa29
 ENVOY_IMAGE=docker.io/envoyproxy/envoy:distroless-v1.33.2@sha256:85500e28ed088ec39ff0adc1be3d358a8ad062926aaa62c36b28bde00919e4e8
+# The GPU run (ADR 5, deploy/gpu/): vLLM v0.32.0's linux/amd64 build with
+# zstd layers (7.3 GB, against 9.2 GB for the gzip one), CUDA 13.0 on the
+# EKS image's driver 580, and NVIDIA's device plugin, which shares the L4.
+VLLM_IMAGE=docker.io/vllm/vllm-openai:v0.32.0-x86_64-zstd@sha256:9aa9a68bd05030a676652ebd41221263748acd055ff9f0f223d4b9e710d98b67
+DEVICE_PLUGIN_IMAGE=nvcr.io/nvidia/k8s-device-plugin:v0.20.1@sha256:d279ecdb47b252c4cd96f4224650e9808c36012f6979570c9611ddbc5b0749a7
 PYTHON_IMAGE=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 ROUTER_CHART=oci://ghcr.io/llm-d/charts/llm-d-router-standalone
 ROUTER_CHART_VERSION=v1.0.0

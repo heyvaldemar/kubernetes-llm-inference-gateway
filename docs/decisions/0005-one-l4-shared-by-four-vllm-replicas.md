@@ -1,0 +1,32 @@
+# 5. The same comparison on one L4, shared by four vLLM replicas
+
+Proposed, 2026-10-30.
+
+## Context
+
+ADR 1 put the routing comparison on simulated model servers first and promised a weekly run on a real GPU second: what the simulator shows as a ratio, the GPU shows in seconds and dollars. The simulator charges prefill by a formula. A GPU charges it in compute, shared with every other request in flight, and its time to first token also holds the work a cache hit does not save: each step reads the model's weights whatever was cached.
+
+Routing needs more than one model server, and the comparison the kind run makes uses four: with two, round-robin would find a conversation's replica half the time, and the test would ask less of the router. The validation account's quota for G and VT instances is 8 vCPUs in us-east-1, and the flagship's weekly GPU run uses 4 of them, on Thursdays. One g6.xlarge, one NVIDIA L4 with four vCPUs, is what a run here can have.
+
+## Decision
+
+- **The same comparison.** `tests/e2e.sh` with its thresholds, the load from `loadgen/loadgen.py` through `scripts/run-load.sh`, the router from `deploy/router-values.yaml` through `scripts/up.sh`, and the round-robin Service: the files the kind run uses, unchanged except that the load names the model the servers serve. Only the model servers differ (`deploy/gpu/model-server.yaml`).
+- **Four vLLM replicas on one L4, by time-slicing.** NVIDIA's device plugin v0.20.1 offers the L4 as four `nvidia.com/gpu` (`deploy/gpu/device-plugin.yaml`), and each replica asks for one. Time-slicing shares the GPU's time, not its memory, so each vLLM is told to take a fifth of it (`--gpu-memory-utilization=0.2`), and the four start one at a time, a StatefulSet with ordered start-up, because vLLM sizes its KV cache from the memory it finds free when it starts. The L4 has no MIG. MPS would run the four replicas' kernels at once, and needs a control daemon beside the device plugin; four L4s would need four times the quota and the price.
+- **A small open model, pinned file by file.** Qwen2.5-1.5B-Instruct, Apache-2.0, at commit `989aa7980e4cf806f80c7fef2b1adb7bc71aa306` of its Hugging Face repository, every file the server reads checked against its sha256 in each pod before vLLM starts. Dense attention, and a chat template that renders earlier turns as they were sent, so a conversation's history is a prefix of its next turn, as the load assumes. Models with linear-attention layers, and templates that rewrite earlier turns (the thinking models'), change what a prefix cache can hold, and are not what this measures.
+- **vLLM v0.32.0, by digest.** Its linux/amd64 build with zstd layers, 7.3 GB against 9.2 GB for the gzip one, which the GPU node pulls while it bills. It runs CUDA 13.0, which needs driver 580 or later; EKS's AL2023 NVIDIA image carries 580.178.04 (v20261026). The server runs as a user with no privileges and a read-only root filesystem.
+- **On EKS, the GPU node for the model servers alone.** The g6.xlarge is tainted so only the four replicas land on it; the router, its Endpoint Picker, the load generator and CoreDNS run on one m7i.large, so the router's path does not compete with vLLM for the GPU node's four vCPUs. Two public subnets and no NAT gateway: the nodes pull about 10 GB a run, which a NAT gateway bills by the gigabyte, and nothing reaches the nodes from outside. The cluster's API answers the runner's address alone (`eks/`, its plan checked against a mocked provider on every push, `eks/tests/`).
+- **What an output token costs.** The model servers' own count of the tokens they generated (`vllm:generation_tokens_total`), over the wall time of each route's runs, at the on-demand price the run reads from the AWS Price List API: the GPU node alone, and with the CPU node and the control plane. This is the price at this load, 16 conversations at a time with answers of up to 24 tokens, not the L4's capacity.
+- **Inside the budget before anything is billed.** A preflight job asks AWS whether the creation role's trust names this repository, whether the GPU quota is free (the flagship's run uses it too), and what the instances cost an hour, and refuses to start a run that could cost more than $1.50 if every billed job ran to its timeout. Teardown runs whatever happened; a destroy that fails twice is followed by the node groups deleted and any instance of the run terminated through the AWS CLI; then nothing may be left with the run's tags or of any earlier run. The cost is computed from each instance's own launch and termination, and a run above $1.50 fails.
+- **Weekly, on Sunday,** behind the repository variable `AWS_VALIDATION_ENABLED`, three days from the flagship's GPU run and four from aws-eks-reference-platform's; by hand on main when the dispatch says SPEND, and a dispatch without it runs the free preflight alone.
+
+## Consequences
+
+- The four replicas take turns on one GPU. A request on one waits while another's kernels run, and each replica reads its own copy of the weights at every step, so the latencies are those of a shared L4, not of one vLLM with the whole GPU. Both routes run on the same four.
+- Each replica's KV cache is what is left of its fifth after the weights, about a gigabyte. Round-robin spreads every conversation over every replica and fills each cache with all of them; the router keeps each conversation on one. What that does to evictions is part of what is measured.
+- vLLM's processes share the GPU node's four vCPUs: each replica's engine loop and API server.
+- The planted breaks run on kind, where each costs nothing. The GPU run runs the same checks, which kind shows their breaks every day, and its own checks of the GPU and the weights without plants of their own.
+- A new vLLM, model or driver changes the weekly numbers. A number in the README is copied from the run it names.
+
+## How to explain this to a customer
+
+The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

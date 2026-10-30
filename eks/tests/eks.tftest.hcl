@@ -1,0 +1,143 @@
+# What the GPU run's Terraform promises (ADR 5), checked on a plan against a
+# mocked AWS provider: no account, no credentials, no cost. CI runs it on
+# every push (e2e.yml, job "Lint"); the run itself is .github/workflows/gpu.yml.
+
+mock_provider "aws" {
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "123456789012", arn = "arn:aws:sts::123456789012:assumed-role/platform-validation-create/run" }
+  }
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+  mock_data "aws_iam_session_context" {
+    defaults = { issuer_arn = "arn:aws:iam::123456789012:role/platform-validation-create" }
+  }
+  # us-east-1c is use1-az3 here, the zone that takes no EKS control plane.
+  mock_data "aws_availability_zones" {
+    defaults = {
+      names    = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"]
+      zone_ids = ["use1-az1", "use1-az2", "use1-az3", "use1-az4"]
+    }
+  }
+}
+
+override_data {
+  target = data.aws_ec2_instance_type_offerings.node["m7i.large"]
+  values = { locations = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"] }
+}
+
+override_data {
+  target = data.aws_ec2_instance_type_offerings.node["g6.xlarge"]
+  values = { locations = ["us-east-1a", "us-east-1c", "us-east-1d"] }
+}
+
+variables {
+  run_id                   = "12345678901"
+  cluster_name             = "reference-platform-inference-12345678901"
+  operator_cidrs           = ["203.0.113.7/32"]
+  iam_permissions_boundary = "arn:aws:iam::123456789012:policy/platform-validation-boundary"
+}
+
+run "two_zones_that_offer_the_gpu" {
+  command = plan
+
+  assert {
+    condition     = local.azs == tolist(["us-east-1a", "us-east-1d"])
+    error_message = "two zones that offer both instance types, and never use1-az3"
+  }
+  assert {
+    condition     = length(aws_subnet.public) == 2 && alltrue([for s in aws_subnet.public : s.map_public_ip_on_launch])
+    error_message = "two public subnets, whose nodes get an address for their own traffic out"
+  }
+}
+
+run "the_api_answers_the_runner_alone" {
+  command = plan
+
+  assert {
+    condition     = aws_eks_cluster.this.vpc_config[0].public_access_cidrs == toset(["203.0.113.7/32"])
+    error_message = "the public endpoint answers the operator's /32 and nothing else"
+  }
+  assert {
+    condition     = aws_eks_cluster.this.vpc_config[0].endpoint_private_access
+    error_message = "the nodes reach the API through the private endpoint"
+  }
+  assert {
+    condition     = aws_eks_cluster.this.access_config[0].authentication_mode == "API" && !aws_eks_cluster.this.access_config[0].bootstrap_cluster_creator_admin_permissions
+    error_message = "access entries only, and the creator is an administrator only by its explicit entry"
+  }
+}
+
+run "one_l4_for_the_model_servers_alone" {
+  command = plan
+
+  assert {
+    condition     = aws_eks_node_group.gpu.instance_types == tolist(["g6.xlarge"]) && aws_eks_node_group.gpu.ami_type == "AL2023_x86_64_NVIDIA"
+    error_message = "one g6.xlarge on EKS's AL2023 NVIDIA image"
+  }
+  assert {
+    condition     = [for t in aws_eks_node_group.gpu.taint : "${t.key}=${t.value}:${t.effect}"] == ["nvidia.com/gpu=present:NO_SCHEDULE"]
+    error_message = "the GPU node is tainted, so only what asks for a GPU lands on it"
+  }
+  assert {
+    condition     = aws_eks_node_group.gpu.labels["inference.heyvaldemar.com/accelerator"] == "nvidia"
+    error_message = "the model servers find the GPU node by its label"
+  }
+  assert {
+    condition     = alltrue([for g in [aws_eks_node_group.gpu, aws_eks_node_group.cpu] : g.scaling_config[0].min_size == 1 && g.scaling_config[0].max_size == 1 && g.capacity_type == "ON_DEMAND"])
+    error_message = "exactly one node of each, on demand, the price the cost per token is computed from"
+  }
+  assert {
+    condition     = aws_eks_node_group.cpu.instance_types == tolist(["m7i.large"]) && length(aws_eks_node_group.cpu.taint) == 0
+    error_message = "everything else on one untainted CPU node"
+  }
+}
+
+run "nodes_keep_pods_off_the_instance_credentials" {
+  command = plan
+
+  assert {
+    condition     = alltrue([for t in aws_launch_template.node : t.metadata_options[0].http_tokens == "required" && t.metadata_options[0].http_put_response_hop_limit == 1])
+    error_message = "IMDSv2 only, one hop: a pod cannot reach the node's role"
+  }
+  assert {
+    condition     = aws_launch_template.node["gpu"].block_device_mappings[0].ebs[0].volume_size == 80 && aws_launch_template.node["gpu"].block_device_mappings[0].ebs[0].encrypted == "true"
+    error_message = "the GPU node's encrypted root volume holds vLLM's image unpacked and the model"
+  }
+}
+
+run "every_role_carries_the_boundary" {
+  command = plan
+
+  assert {
+    condition     = alltrue([for r in [aws_iam_role.cluster, aws_iam_role.node] : r.permissions_boundary == var.iam_permissions_boundary && startswith(r.name, var.cluster_name)])
+    error_message = "every role the run makes carries the account's boundary, under the cluster's name"
+  }
+}
+
+run "a_name_outside_the_guardrails_is_refused" {
+  command = plan
+  variables {
+    cluster_name = "inference-12345678901"
+  }
+  expect_failures = [var.cluster_name]
+}
+
+run "an_api_open_to_a_range_is_refused" {
+  command = plan
+  variables {
+    operator_cidrs = ["203.0.113.0/24"]
+  }
+  expect_failures = [var.operator_cidrs]
+}
+
+run "fewer_than_two_zones_with_the_gpu_stop_the_plan" {
+  command = plan
+
+  override_data {
+    target = data.aws_ec2_instance_type_offerings.node["g6.xlarge"]
+    values = { locations = ["us-east-1a", "us-east-1c"] }
+  }
+
+  expect_failures = [aws_vpc.this]
+}

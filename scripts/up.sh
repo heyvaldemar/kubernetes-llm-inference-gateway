@@ -7,6 +7,11 @@
 #
 #   scripts/up.sh            CLUSTER, KUBECONFIG and ROUTER_VALUES may be set;
 #                            ROUTER_EXTRA_VALUES layers a second values file over it
+#
+# The GPU run (ADR 5) brings up the same router on EKS in front of other model
+# servers: USE_KIND=0 takes the cluster the kubeconfig names as it is,
+# MODEL_SERVERS and MODEL_SERVER_WORKLOAD name the servers' manifest and
+# workload, and ROLLOUT_TIMEOUT allows for vLLM starting four times.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -14,9 +19,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER="${CLUSTER:-ilg}"
 ROUTER_VALUES="${ROUTER_VALUES:-$ROOT/deploy/router-values.yaml}"
 ROUTER_EXTRA_VALUES="${ROUTER_EXTRA_VALUES:-}"
+USE_KIND="${USE_KIND:-1}"
+MODEL_SERVERS="${MODEL_SERVERS:-$ROOT/deploy/model-server.yaml}"
+MODEL_SERVER_WORKLOAD="${MODEL_SERVER_WORKLOAD:-deploy/model-server}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 say() { printf '== %s\n' "$*"; }
 
-if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+if [ "$USE_KIND" = 1 ] && ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   say "kind cluster $CLUSTER"
   kind create cluster --name "$CLUSTER" --config "$ROOT/cluster/kind.yaml" --wait 120s >/dev/null
 fi
@@ -24,16 +33,19 @@ fi
 say "the InferencePool CRD, Gateway API Inference Extension $GAIE_VERSION"
 kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$GAIE_VERSION/v1-manifests.yaml" >/dev/null
 
-say "four model servers (llm-d-inference-sim) and the round-robin Service"
-kubectl apply -f "$ROOT/deploy/model-server.yaml" >/dev/null
+say "four model servers ($(basename "$(dirname "$MODEL_SERVERS")")/$(basename "$MODEL_SERVERS")) and the round-robin Service"
+existed=false
+kubectl get "$MODEL_SERVER_WORKLOAD" >/dev/null 2>&1 && existed=true
+kubectl apply -f "$MODEL_SERVERS" >/dev/null
 
 say "the llm-d router ($ROUTER_CHART $ROUTER_CHART_VERSION)"
 helm upgrade --install router "$ROUTER_CHART" --version "$ROUTER_CHART_VERSION" \
   -f "$ROUTER_VALUES" ${ROUTER_EXTRA_VALUES:+-f "$ROUTER_EXTRA_VALUES"} --wait --timeout 5m >/dev/null
 
 # Empty caches for every test: a restart is the only reset the simulator has.
-kubectl rollout restart deploy/model-server >/dev/null
-kubectl rollout status deploy/model-server --timeout=180s >/dev/null
+# Servers this run just made have served nothing yet.
+if $existed; then kubectl rollout restart "$MODEL_SERVER_WORKLOAD" >/dev/null; fi
+kubectl rollout status "$MODEL_SERVER_WORKLOAD" --timeout="$ROLLOUT_TIMEOUT" >/dev/null
 # The EPP reads its plugins from a ConfigMap at start, and the chart puts no
 # checksum of it on the pod, so `helm upgrade` with new plugins leaves the
 # old ones running. Restart it every time, or a test of a changed config

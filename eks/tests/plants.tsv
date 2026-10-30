@@ -1,0 +1,6 @@
+# file	old	new	what the Terraform tests must notice
+"eks/network.tf"	"if id != \"use1-az3\"]"	"if id != \"none\"]"	"a zone that takes no EKS control plane is picked"
+"eks/nodes.tf"	"http_put_response_hop_limit = 1"	"http_put_response_hop_limit = 2"	"a pod reaches the node's credentials through IMDS"
+"eks/cluster.tf"	"public_access_cidrs     = var.operator_cidrs"	"public_access_cidrs     = [\"0.0.0.0/0\"]"	"the cluster's API answers the whole internet"
+"eks/nodes.tf"	"effect = \"NO_SCHEDULE\""	"effect = \"PREFER_NO_SCHEDULE\""	"anything may land on the GPU node"
+"eks/variables.tf"	"[a-z0-9-]{1,30}$\", var.cluster_name"	"[a-z0-9-]{1,30}$|^[a-z0-9-]+$\", var.cluster_name"	"a cluster name outside the guardrails' prefix is accepted"

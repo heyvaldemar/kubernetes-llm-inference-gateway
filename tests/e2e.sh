@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Does routing by prefix cache beat round-robin, on the same model servers?
 #
-#   tests/e2e.sh            (after scripts/up.sh; RESULTS=<dir> keeps the JSON)
+#   tests/e2e.sh            (after scripts/up.sh; RESULTS=<dir> keeps the JSON;
+#                           MODEL names the model the servers serve)
 #
 # The same multi-turn load, 32 conversations of 6 turns, goes once through a
 # plain Service (kube-proxy picks a replica at random) and once through the
@@ -22,13 +23,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULTS="${RESULTS:-$ROOT/results}"
 RATIO_MAX="${RATIO_MAX:-0.6}"
 HIT_GAIN_MIN="${HIT_GAIN_MIN:-0.2}"
+MODEL="${MODEL:-sim/model}"
 mkdir -p "$RESULTS"
 fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
 ok() { echo "OK: $*"; }
 
 run() {  # run <label> <target> <seed>: one load, its JSON into $RESULTS
-  if ! "$ROOT/scripts/run-load.sh" "$1" "$2" "$3" > "$RESULTS/$1-$3.json"; then
+  if ! "$ROOT/scripts/run-load.sh" "$1" "$2" "$3" --model "$MODEL" > "$RESULTS/$1-$3.json"; then
     bad "$1 ($3): the load job failed or some requests failed: $(cut -c1-300 "$RESULTS/$1-$3.json")"
   fi
 }

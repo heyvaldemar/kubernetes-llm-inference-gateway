@@ -5,3 +5,10 @@ results/
 !**/package.json
 .DS_Store
 __pycache__/
+
+# Terraform for the GPU run (eks/): providers, plans and local state stay
+# local; a run's state lives in the account's state bucket
+eks/.terraform/
+eks/ci_backend.tf
+eks/*.tfplan
+eks/*.tfstate*
