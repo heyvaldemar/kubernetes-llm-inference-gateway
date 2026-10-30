@@ -89,3 +89,33 @@ variable "gpu_disk_gib" {
   type        = number
   default     = 80
 }
+
+variable "gpu_zone" {
+  description = <<-EOT
+    The zone the run's L4 is reserved in, and its node made in. Empty for the
+    run's first apply, which makes the cluster and the CPU node only;
+    scripts/eks.sh reserve sets it to the first zone that gives one.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.gpu_zone == "" || can(regex("^[a-z]{2}-[a-z]+-[0-9][a-z]$", var.gpu_zone))
+    error_message = "gpu_zone is empty or a zone name such as us-east-1a."
+  }
+}
+
+variable "gpu_reservation_ends" {
+  description = <<-EOT
+    When AWS ends the GPU's reservation by itself (RFC 3339, UTC): after the
+    longest a run can take, so a reservation a failed teardown left stops
+    billing within hours, not at the next week's sweep.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.gpu_reservation_ends == null || can(formatdate("YYYY", var.gpu_reservation_ends))
+    error_message = "gpu_reservation_ends is an RFC 3339 time, such as 2026-10-30T18:00:00Z."
+  }
+}

@@ -23,9 +23,9 @@ data "aws_ec2_instance_type_offerings" "node" {
 }
 
 locals {
-  # Every zone that offers both instance types, up to four, so the GPU node
-  # group can launch in whichever has an L4 free: g6 capacity in a zone comes
-  # and goes. use1-az3 takes no EKS control plane.
+  # Every zone that offers both instance types, up to four, so the run can
+  # reserve an L4 in whichever has one free: g6 capacity in a zone comes and
+  # goes. use1-az3 takes no EKS control plane.
   zone_ids = zipmap(data.aws_availability_zones.available.names, data.aws_availability_zones.available.zone_ids)
   offered = setintersection(
     [for name, id in local.zone_ids : name if id != "use1-az3"],

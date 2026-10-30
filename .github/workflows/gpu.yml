@@ -171,7 +171,9 @@ jobs:
           BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
           ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')"
-          python3 -I - "$ip" > run.tfvars.json <<'PY'
+          # The GPU's reservation ends by itself 150 minutes from now, after
+          # the longest the up and down jobs can take together.
+          python3 -I - "$ip" "$(date -u -d '+150 minutes' +%Y-%m-%dT%H:%M:%SZ)" > run.tfvars.json <<'PY'
           import json, os, sys
           print(json.dumps({
               "run_id": os.environ["RUN_ID"],
@@ -181,6 +183,8 @@ jobs:
               "node_instance_type": os.environ["NODE_TYPE"],
               "gpu_instance_type": os.environ["GPU_TYPE"],
               "gpu_disk_gib": int(os.environ["GPU_DISK_GIB"]),
+              "gpu_zone": "",
+              "gpu_reservation_ends": sys.argv[2],
           }, indent=1))
           PY
           aws s3 cp run.tfvars.json "s3://$BUCKET/inference-runs/$RUN_ID.tfvars.json"
@@ -200,20 +204,34 @@ jobs:
         id: start
         run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      # Terraform is interrupted before the step's timeout could kill it, so
-      # it stops on its own, writes what it made to the state and releases
-      # the state's lock. Run 41067783938's apply was killed by the step's
-      # timeout while the GPU node group was still being created: the state
-      # never held that group, and the lock stayed.
-      - name: Apply
-        timeout-minutes: 38
-        run: timeout -s INT -k 3m 34m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
+      # Each apply is interrupted before its step's timeout could kill it, so
+      # Terraform stops on its own, writes what it made to the state and
+      # releases the state's lock. Run 41067783938's apply was killed by the
+      # step's timeout while the GPU node group was still being created: the
+      # state never held that group, and the lock stayed.
+      - name: Apply, the cluster and the CPU node
+        timeout-minutes: 28
+        run: timeout -s INT -k 3m 24m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
 
       - name: The cluster, from the runner's address
         run: |
           aws eks update-kubeconfig --name "$CLUSTER" >/dev/null
           kubectl wait nodes --all --for=condition=Ready --timeout=600s
           kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+
+      # Capacity first (ADR 5): run 41067783938's GPU node group waited 19
+      # minutes on launches AWS refused for capacity in both of its zones.
+      - name: An L4, reserved in the first zone that has one
+        timeout-minutes: 25
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          VARS: ${{ github.workspace }}/run.tfvars.json
+        run: ./scripts/eks.sh reserve | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply, the GPU node in the reservation
+        timeout-minutes: 20
+        run: |
+          timeout -s INT -k 3m 16m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
           kubectl get nodes -L node.kubernetes.io/instance-type,topology.kubernetes.io/zone
 
       - name: The L4, offered as four

@@ -36,6 +36,8 @@ variables {
   cluster_name             = "reference-platform-inference-12345678901"
   operator_cidrs           = ["203.0.113.7/32"]
   iam_permissions_boundary = "arn:aws:iam::123456789012:policy/platform-validation-boundary"
+  gpu_zone                 = "us-east-1d"
+  gpu_reservation_ends     = "2026-10-30T18:00:00Z"
 }
 
 run "every_zone_that_offers_the_gpu" {
@@ -86,25 +88,66 @@ run "one_l4_for_the_model_servers_alone" {
   command = plan
 
   assert {
-    condition     = aws_eks_node_group.gpu.instance_types == tolist(["g6.xlarge"]) && aws_eks_node_group.gpu.ami_type == "AL2023_x86_64_NVIDIA"
+    condition     = aws_eks_node_group.gpu[0].instance_types == tolist(["g6.xlarge"]) && aws_eks_node_group.gpu[0].ami_type == "AL2023_x86_64_NVIDIA"
     error_message = "one g6.xlarge on EKS's AL2023 NVIDIA image"
   }
   assert {
-    condition     = [for t in aws_eks_node_group.gpu.taint : "${t.key}=${t.value}:${t.effect}"] == ["nvidia.com/gpu=present:NO_SCHEDULE"]
+    condition     = [for t in aws_eks_node_group.gpu[0].taint : "${t.key}=${t.value}:${t.effect}"] == ["nvidia.com/gpu=present:NO_SCHEDULE"]
     error_message = "the GPU node is tainted, so only what asks for a GPU lands on it"
   }
   assert {
-    condition     = aws_eks_node_group.gpu.labels["inference.heyvaldemar.com/accelerator"] == "nvidia"
+    condition     = aws_eks_node_group.gpu[0].labels["inference.heyvaldemar.com/accelerator"] == "nvidia"
     error_message = "the model servers find the GPU node by its label"
   }
   assert {
-    condition     = alltrue([for g in [aws_eks_node_group.gpu, aws_eks_node_group.cpu] : g.scaling_config[0].min_size == 1 && g.scaling_config[0].max_size == 1 && g.capacity_type == "ON_DEMAND"])
+    condition     = alltrue([for g in [aws_eks_node_group.gpu[0], aws_eks_node_group.cpu] : g.scaling_config[0].min_size == 1 && g.scaling_config[0].max_size == 1 && g.capacity_type == "ON_DEMAND"])
     error_message = "exactly one node of each, on demand, the price the cost per token is computed from"
   }
   assert {
     condition     = aws_eks_node_group.cpu.instance_types == tolist(["m7i.large"]) && length(aws_eks_node_group.cpu.taint) == 0
     error_message = "everything else on one untainted CPU node"
   }
+}
+
+run "the_l4_is_reserved_before_its_node_exists" {
+  command = plan
+
+  assert {
+    condition     = aws_ec2_capacity_reservation.gpu[0].instance_type == "g6.xlarge" && aws_ec2_capacity_reservation.gpu[0].availability_zone == "us-east-1d" && aws_ec2_capacity_reservation.gpu[0].instance_count == 1
+    error_message = "one g6.xlarge reserved, in the zone the run found one in"
+  }
+  assert {
+    condition     = aws_ec2_capacity_reservation.gpu[0].instance_match_criteria == "targeted"
+    error_message = "targeted: only a launch that names the reservation takes it"
+  }
+  assert {
+    condition     = aws_ec2_capacity_reservation.gpu[0].end_date_type == "limited" && aws_ec2_capacity_reservation.gpu[0].end_date == "2026-10-30T18:00:00Z"
+    error_message = "AWS ends the reservation by itself, whatever happens to the teardown"
+  }
+  assert {
+    condition     = length(aws_launch_template.node["gpu"].capacity_reservation_specification) == 1 && length(aws_launch_template.node["cpu"].capacity_reservation_specification) == 0
+    error_message = "the GPU node launches into the reservation, and the CPU node does not"
+  }
+}
+
+run "the_first_apply_makes_no_gpu" {
+  command = plan
+  variables {
+    gpu_zone = ""
+  }
+
+  assert {
+    condition     = length(aws_ec2_capacity_reservation.gpu) == 0 && length(aws_eks_node_group.gpu) == 0
+    error_message = "no reservation and no GPU node until a zone has given one"
+  }
+}
+
+run "a_zone_outside_the_run_is_refused" {
+  command = plan
+  variables {
+    gpu_zone = "us-east-1c"
+  }
+  expect_failures = [aws_ec2_capacity_reservation.gpu]
 }
 
 run "nodes_keep_pods_off_the_instance_credentials" {
@@ -147,6 +190,9 @@ run "an_api_open_to_a_range_is_refused" {
 
 run "fewer_than_two_zones_with_the_gpu_stop_the_plan" {
   command = plan
+  variables {
+    gpu_zone = ""
+  }
 
   override_data {
     target = data.aws_ec2_instance_type_offerings.node["g6.xlarge"]

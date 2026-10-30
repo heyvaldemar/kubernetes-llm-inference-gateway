@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# eks.sh <preflight|sweep|unlock|gpu|check|tokens|diagnose|stop|residue|cost> - the
+# eks.sh <preflight|sweep|unlock|reserve|gpu|check|tokens|diagnose|stop|residue|cost> - the
 # parts of the GPU run (ADR 5) that are not Terraform and not the comparison.
 # .github/workflows/gpu.yml calls them; each reads the environment it sets:
 # AWS_REGION, TF_STATE_BUCKET, CLUSTER (the run's cluster name), RUN_ID.
@@ -12,6 +12,10 @@
 #   sweep      destroy what an earlier run of this workflow left: any other
 #              state under inference-runs/ that still holds resources
 #   unlock     remove the lock a stopped Terraform left on this run's state
+#   reserve    after the first apply: an On-Demand Capacity Reservation for
+#              one L4, tried in each of the run's zones until one gives it,
+#              and the zone written to the run's variables for the second
+#              apply, which makes the GPU node in it
 #   gpu        NVIDIA's device plugin, and the GPU node offering its L4 as four
 #   check      after scripts/up.sh: four model servers, all on the GPU node,
 #              all on the same L4, each serving the pinned model with weights
@@ -19,14 +23,15 @@
 #   tokens     what each route's output tokens cost, from the e2e's results
 #              and the prices preflight read
 #   diagnose   what the cluster looked like, when a step failed
-#   stop       when a destroy failed: the node groups deleted and any instance
-#              of the run terminated by the AWS CLI, so nothing bills while a
-#              person looks
+#   stop       when a destroy failed: the node groups deleted, any instance
+#              of the run terminated and its reservation cancelled by the AWS
+#              CLI, so nothing bills while a person looks
 #   residue    after the destroy, anything still tagged with the run's
 #              cluster, or with any earlier run of this project: none is the
 #              only passing answer
 #   cost       what the run cost, from each instance's own launch and
-#              termination, and the control plane from apply to destroy
+#              termination, the GPU from its reservation's start, and the
+#              control plane from apply to destroy
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREFIX=inference-runs
@@ -193,7 +198,30 @@ PY
     unlock "$PREFIX/$RUN_ID.tfstate"
     ;;
 
+  reserve)
+    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}" "${VARS:?}" "${GPU_TYPE:?}"
+    zones="$(terraform -chdir="$ROOT/eks" output -json zones | python3 -I -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')"
+    refused=""
+    for z in $zones; do
+      if out="$(timeout -s INT -k 1m 5m terraform -chdir="$ROOT/eks" apply -input=false -auto-approve -no-color \
+                  -var-file="$VARS" -var "gpu_zone=$z" -target=aws_ec2_capacity_reservation.gpu 2>&1)"; then
+        python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"]=sys.argv[2]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z"
+        aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
+        say "one $GPU_TYPE reserved in $z${refused:+, after no capacity in$refused}"
+        exit 0
+      fi
+      if grep -q InsufficientInstanceCapacity <<<"$out"; then
+        refused="$refused $z"; say "$z: no $GPU_TYPE capacity"; continue
+      fi
+      printf '%s\n' "$out" | tail -25 >&2
+      exit 1
+    done
+    echo "no zone of the run had a $GPU_TYPE to reserve ($zones): no GPU was made, and the run stops here" >&2
+    exit 1
+    ;;
+
   gpu)
+    kubectl wait nodes -l "$GPU_LABEL" --for=condition=Ready --timeout=600s >/dev/null
     kubectl apply -f "$ROOT/deploy/gpu/device-plugin.yaml" >/dev/null
     kubectl -n kube-system rollout status ds/nvidia-device-plugin --timeout=300s >/dev/null
     offered=""
@@ -326,7 +354,11 @@ for e in json.load(sys.stdin) or []:
       # shellcheck disable=SC2086 # one argument per instance
       aws ec2 terminate-instances --instance-ids $ids >/dev/null && say "terminated $ids"
     fi
-    say "no node of $CLUSTER is left running; the rest waits for the next run's sweep"
+    for cr in $(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" Name=state,Values=active,pending \
+                  --query 'CapacityReservations[].CapacityReservationId' --output text); do
+      aws ec2 cancel-capacity-reservation --capacity-reservation-id "$cr" >/dev/null && say "cancelled reservation $cr"
+    done
+    say "no node of $CLUSTER is left running and no reservation held; the rest waits for the next run's sweep"
     ;;
 
   residue)
@@ -343,6 +375,8 @@ for e in json.load(sys.stdin) or []:
         *:security-group/*) aws ec2 describe-security-groups --group-ids "$id" >/dev/null 2>&1 ;;
         *:launch-template/*) aws ec2 describe-launch-templates --launch-template-ids "$id" >/dev/null 2>&1 ;;
         *:volume/*) aws ec2 describe-volumes --volume-ids "$id" >/dev/null 2>&1 ;;
+        *:capacity-reservation/*) case "$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$id" --query 'CapacityReservations[0].State' --output text 2>/dev/null)" in
+                                    active|pending) true ;; *) false ;; esac ;;
         *:instance/*) [ "$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != terminated ] \
                         && aws ec2 describe-instances --instance-ids "$id" >/dev/null 2>&1 ;;
         *) true ;;
@@ -358,11 +392,15 @@ for e in json.load(sys.stdin) or []:
                --query "ResourceTagMappingList[].[ResourceARN, Tags[?Key=='$TAG/cluster'] | [0].Value]" --output text || true)
     roles="$(aws iam list-roles --query "Roles[?starts_with(RoleName, 'reference-platform-inference-')].RoleName" --output text | tr '\t' '\n' | grep -v '^$' || true)"
     cluster="$(aws eks list-clusters --query "clusters[?starts_with(@, 'reference-platform-inference-')]" --output text | tr '\t' ' ')"
+    # A reservation bills like the instance; asked for by state as well as
+    # through the tagging API.
+    held="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=state,Values=active,pending \
+              --query 'CapacityReservations[].CapacityReservationId' --output text | tr '\t' ' ')"
     [ "$gone" -gt 0 ] && say "the tagging API still lists $gone resource(s) that no longer exist"
-    if [ -z "${really// /}" ] && [ -z "${elsewhere// /}" ] && [ -z "$roles" ] && [ -z "${cluster// /}" ]; then
+    if [ -z "${really// /}" ] && [ -z "${elsewhere// /}" ] && [ -z "$roles" ] && [ -z "${cluster// /}" ] && [ -z "${held// /}" ]; then
       say "nothing left of $CLUSTER, and nothing of any earlier run"; exit 0
     fi
-    echo "left behind: clusters '${cluster:-none}'; roles: ${roles//$'\n'/ }; this run's tagged:${really:- none}; earlier runs':${elsewhere:- none}" >&2
+    echo "left behind: clusters '${cluster:-none}'; reservations '${held:-none}'; roles: ${roles//$'\n'/ }; this run's tagged:${really:- none}; earlier runs':${elsewhere:- none}" >&2
     exit 1
     ;;
 
@@ -370,25 +408,38 @@ for e in json.load(sys.stdin) or []:
     : "${CLUSTER:?}" "${STARTED:?}" "${GPU_USD:?}" "${NODE_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}" "${MAX_RUN_USD:?}"
     instances="$(aws ec2 describe-instances --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
       --query 'Reservations[].Instances[].[InstanceType, LaunchTime, State.Name, StateTransitionReason]' --output json)"
-    python3 -I - "$instances" "$STARTED" "$(date +%s)" "$GPU_TYPE" "$GPU_USD" "$NODE_TYPE" "$NODE_USD" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
+    reserved="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
+      --query 'CapacityReservations[].[InstanceType, CreateDate, State]' --output json)"
+    python3 -I - "$instances" "$reserved" "$STARTED" "$(date +%s)" "$GPU_TYPE" "$GPU_USD" "$NODE_TYPE" "$NODE_USD" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
       "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "$MAX_RUN_USD" <<'PY'
 import datetime as dt, json, re, sys
-instances = json.loads(sys.argv[1])
-started, now = int(sys.argv[2]), int(sys.argv[3])
-gpu_type, gpu, node_type, node = sys.argv[4], float(sys.argv[5]), sys.argv[6], float(sys.argv[7])
-disk = {gpu_type: int(sys.argv[8]), node_type: int(sys.argv[9])}
+instances, reserved = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+started, now = int(sys.argv[3]), int(sys.argv[4])
+gpu_type, gpu, node_type, node = sys.argv[5], float(sys.argv[6]), sys.argv[7], float(sys.argv[8])
+disk = {gpu_type: int(sys.argv[9]), node_type: int(sys.argv[10])}
 price = {gpu_type: gpu, node_type: node}
-eks, ipv4, gp3, cap = map(float, sys.argv[10:14])
+eks, ipv4, gp3, cap = map(float, sys.argv[11:15])
 def epoch(s):
     return int(dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
 rows = [("EKS control plane, from the apply to the end of the destroy", eks, (now - started) / 3600)]
+# A reservation bills as its instance would, from its start to its end,
+# with the instance inside it or not, and the instance it holds bills
+# nothing more. Priced to the end of the destroy, which ends it.
+in_reservation = set()
+for itype, created, state in reserved:
+    h = (now - epoch(created)) / 3600
+    rows.append(("one %s reserved, %.2f h, its node inside it" % (itype, h), price[itype], h))
+    in_reservation.add(itype)
 for itype, launched, state, reason in instances:
     # EC2 bills an instance by the second from its launch to its termination,
     # which it records as "User initiated (YYYY-MM-DD HH:MM:SS GMT)".
     m = re.search(r"\((\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) GMT\)", reason or "")
     end = epoch(m.group(1).replace(" ", "T") + "Z") if state == "terminated" and m else now
     h = max(end - epoch(launched), 60) / 3600
-    rows.append(("one %s, %s, %.2f h" % (itype, state, h), price[itype], h))
+    if itype in in_reservation:
+        rows.append(("one %s, %s, %.2f h, billed through its reservation" % (itype, state, h), 0.0, h))
+    else:
+        rows.append(("one %s, %s, %.2f h" % (itype, state, h), price[itype], h))
     rows.append(("its public IPv4 address and %d GiB gp3" % disk[itype], ipv4 + disk[itype] * gp3 / 730, h))
 total = sum(r * h for _, r, h in rows)
 print("| What | Per hour | This run |\n|---|---|---|")
@@ -400,5 +451,5 @@ if total > cap:
 PY
     ;;
 
-  *) echo "usage: eks.sh <preflight|sweep|unlock|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
+  *) echo "usage: eks.sh <preflight|sweep|unlock|reserve|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
 esac
