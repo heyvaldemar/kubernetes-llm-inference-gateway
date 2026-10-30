@@ -136,6 +136,18 @@ for what, n in refused.most_common(5):
 if not refused:
     print("== no launch refused in the last 24 h")' || say "CloudTrail could not be read"
 
+    # This project's reservations, any state: one still active is residue
+    # that bills like a running GPU.
+    aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" \
+      --query 'CapacityReservations[].[CapacityReservationId, AvailabilityZone, State, CreateDate, Tags[?Key==`'"$TAG"'/cluster`] | [0].Value]' --output text \
+      | while read -r id zone state created owner; do say "reservation $id ($owner), $zone: $state, made $created"; done
+    held="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=state,Values=active,pending \
+              --query 'CapacityReservations[].CapacityReservationId' --output text)"
+    if [ -n "$held" ]; then
+      echo "a reservation of this project is still held ($held): it bills like a running $GPU_TYPE; nothing was created" >&2
+      exit 1
+    fi
+
     gpu_usd="$(price "$GPU_TYPE")"; node_usd="$(price "$NODE_TYPE")"
     # The most the run can cost: every hourly price for as long as the two
     # billed jobs' timeouts allow, read from the workflow itself.
@@ -199,21 +211,33 @@ PY
     ;;
 
   reserve)
-    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}" "${VARS:?}" "${GPU_TYPE:?}"
+    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}" "${CLUSTER:?}" "${VARS:?}" "${GPU_TYPE:?}"
+    # Asked of EC2 directly, then imported, so Terraform destroys it with
+    # the rest. Through Terraform, run 41075374482's request for its first
+    # zone had no answer after five minutes: the AWS provider retries a
+    # server error up to 25 times by default, and EC2 answers a zone with
+    # no capacity with one (Server.InsufficientInstanceCapacity). Here a
+    # refusal is final after one more try.
     zones="$(terraform -chdir="$ROOT/eks" output -json zones | python3 -I -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')"
+    ends="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_reservation_ends"])' "$VARS")"
+    tags="$(python3 -I -c 'import json,sys; t, p, c, r = sys.argv[1:]; print(json.dumps([{"ResourceType": "capacity-reservation", "Tags": [
+      {"Key": t + "/project", "Value": p}, {"Key": t + "/cluster", "Value": c}, {"Key": "run-id", "Value": r},
+      {"Key": "managed-by", "Value": "terraform"}, {"Key": "Name", "Value": c + "-gpu"}]}]))' "$TAG" "$PROJECT" "$CLUSTER" "$RUN_ID")"
     refused=""
     for z in $zones; do
-      if out="$(timeout -s INT -k 1m 5m terraform -chdir="$ROOT/eks" apply -input=false -auto-approve -no-color \
-                  -var-file="$VARS" -var "gpu_zone=$z" -target=aws_ec2_capacity_reservation.gpu 2>&1)"; then
+      if out="$(AWS_MAX_ATTEMPTS=2 aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
+                  --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
+                  --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)"; then
         python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"]=sys.argv[2]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z"
         aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
-        say "one $GPU_TYPE reserved in $z${refused:+, after no capacity in$refused}"
+        terraform -chdir="$ROOT/eks" import -input=false -no-color -var-file="$VARS" 'aws_ec2_capacity_reservation.gpu[0]' "$out" >/dev/null
+        say "one $GPU_TYPE reserved in $z ($out)${refused:+, after no capacity in$refused}"
         exit 0
       fi
       if grep -q InsufficientInstanceCapacity <<<"$out"; then
         refused="$refused $z"; say "$z: no $GPU_TYPE capacity"; continue
       fi
-      printf '%s\n' "$out" | tail -25 >&2
+      printf '%s\n' "$out" >&2
       exit 1
     done
     echo "no zone of the run had a $GPU_TYPE to reserve ($zones): no GPU was made, and the run stops here" >&2
@@ -428,7 +452,11 @@ rows = [("EKS control plane, from the apply to the end of the destroy", eks, (no
 in_reservation = set()
 for itype, created, state in reserved:
     h = (now - epoch(created)) / 3600
-    rows.append(("one %s reserved, %.2f h, its node inside it" % (itype, h), price[itype], h))
+    if state == "failed":
+        # EC2 could not fill it, and bills nothing for it.
+        rows.append(("one %s asked for, which EC2 could not reserve (failed)" % itype, 0.0, h))
+        continue
+    rows.append(("one %s reserved, %s, %.2f h, its node inside it" % (itype, state, h), price[itype], h))
     in_reservation.add(itype)
 for itype, launched, state, reason in instances:
     # EC2 bills an instance by the second from its launch to its termination,
