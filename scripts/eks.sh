@@ -303,7 +303,7 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
         for id in $(held "$z"); do aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null && say "$z: cancelled $id"; done
         refused="$refused $z"
       done
-      say "round $round, $(date -u +%H:%M) UTC: no $GPU_TYPE capacity in$refused"
+      [ -z "$refused" ] || say "round $round, $(date -u +%H:%M) UTC: no $GPU_TYPE capacity in$refused"
       [ "$(date +%s)" -lt "$deadline" ] || break
       sleep 120
     done
