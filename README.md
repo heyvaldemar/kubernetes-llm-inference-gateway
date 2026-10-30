@@ -55,7 +55,7 @@ The reasoning is in three decision records: why the simulator before the GPU ([A
 - through the router, a median time to first token after the first turn of at most 0.6 of round-robin's, in every round;
 - through the router, a cache hit rate at least 20 points above round-robin's, in every round.
 
-Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the router picking a replica at random, model servers with no prefix cache, an `InferencePool` that selects no model server, a "baseline" that is the router itself, and a threshold no honest run can meet. Each must fail the test.
+Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the router picking a replica at random, model servers with no prefix cache, an `InferencePool` that selects no model server, a "baseline" that is the router itself, a threshold no honest run can meet, and the chart's own Envoy, a tag with no digest. Each must fail the test.
 
 ## Quickstart
 
@@ -66,11 +66,11 @@ Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the
 kind delete cluster --name ilg    # teardown
 ```
 
-Needs Docker, kind, helm and kubectl. Every image is pinned by digest in [`images.lock`](images.lock).
+Needs Docker, kind, helm and kubectl. Every image is pinned by digest in [`images.lock`](images.lock), and the test fails if the cluster runs any image that file does not name, the ones a chart brings by default included.
 
 ## What it costs
 
-Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run takes about four minutes on a GitHub runner; the planted breaks take about fifteen more.
+Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run, cluster included, takes about three minutes on a GitHub runner; the planted breaks take about thirteen more.
 
 ## What it does not do
 

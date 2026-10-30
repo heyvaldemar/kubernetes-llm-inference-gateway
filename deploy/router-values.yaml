@@ -14,6 +14,10 @@ router:
       targetPort: 8081
   proxy:
     replicas: 1
+    # The chart names Envoy by tag only; this is the same release, pinned.
+    presets:
+      envoy:
+        image: docker.io/envoyproxy/envoy:distroless-v1.33.2@sha256:85500e28ed088ec39ff0adc1be3d358a8ad062926aaa62c36b28bde00919e4e8
     resources:
       requests:
         cpu: 100m

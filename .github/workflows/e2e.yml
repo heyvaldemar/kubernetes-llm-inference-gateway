@@ -43,7 +43,8 @@ jobs:
     name: Prefix-aware routing against round-robin
     runs-on: ubuntu-latest
     needs: lint
-    # The comparison takes about four minutes; the plants run it six more times.
+    # Up and the comparison take about three minutes; the plants run both
+    # seven more times.
     timeout-minutes: 45
     steps:
       - name: Checkout

@@ -7,6 +7,7 @@
 # plain Service (kube-proxy picks a replica at random) and once through the
 # llm-d router, twice each, in alternating order and with conversations no
 # cache has seen. It requires:
+#   - every image running in the cluster pinned in images.lock;
 #   - every request answered, on both routes;
 #   - through the router, a time to first token after the first turn (the
 #     turns a cache can help) of at most RATIO_MAX of round-robin's, at the
@@ -31,6 +32,18 @@ run() {  # run <label> <target> <seed>: one load, its JSON into $RESULTS
     bad "$1 ($3): the load job failed or some requests failed: $(cut -c1-300 "$RESULTS/$1-$3.json")"
   fi
 }
+
+# What runs is what images.lock names, digest and all, including the images a
+# chart brings in its own defaults, which no file in deploy/ shows.
+running="$(kubectl get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u)"
+stray="$(grep -vxF -f <(sed -n 's/^[A-Z0-9_]*_IMAGE=//p' "$ROOT/images.lock") <<<"$running" || true)"
+if [ -z "$running" ]; then
+  bad "no pods running: run scripts/up.sh first"
+elif [ -n "$stray" ]; then
+  bad "images running that images.lock does not pin: $(paste -sd' ' - <<<"$stray")"
+else
+  ok "every image running is pinned in images.lock"
+fi
 
 ROUTER=http://router-epp:80
 ROUNDROBIN=http://model-server-roundrobin:8000

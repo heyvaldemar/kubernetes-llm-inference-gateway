@@ -4,3 +4,4 @@
 "deploy/router-values.yaml"	"      app: model-server\n"	"      app: model-servers\n"	"the InferencePool selects no model server"
 "tests/e2e.sh"	"ROUNDROBIN=http://model-server-roundrobin:8000"	"ROUNDROBIN=http://router-epp:80"	"the baseline is the router itself, so there is nothing to beat"
 "tests/e2e.sh"	"RATIO_MAX=\"${RATIO_MAX:-0.6}\""	"RATIO_MAX=\"${RATIO_MAX:-0.2}\""	"a threshold no honest run can meet is noticed as a failure, not a pass"
+"deploy/router-values.yaml"	"    presets:\n      envoy:\n        image: docker.io/envoyproxy/envoy:distroless-v1.33.2@sha256:85500e28ed088ec39ff0adc1be3d358a8ad062926aaa62c36b28bde00919e4e8\n"	""	"the proxy runs the chart's Envoy, a tag with no digest"
