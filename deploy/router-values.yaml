@@ -1,0 +1,49 @@
+# The llm-d router (llm-d-router-standalone v1.0.0): an Envoy proxy that asks
+# the Endpoint Picker (EPP) over ext_proc which replica gets each request.
+# The plugins are llm-d's optimized-baseline: prefix-cache affinity first,
+# then the replica with the least prefill work queued. Resources are cut from
+# the chart's production defaults (8 CPU for the EPP) to fit one kind node.
+router:
+  modelServers:
+    matchLabels:
+      app: model-server
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
+  proxy:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+  epp:
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-router-endpoint-picker
+      tag: v1.0.0@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+    pluginsConfigFile: optimized-baseline-plugins.yaml
+    pluginsCustomConfig:
+      optimized-baseline-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: approx-prefix-cache-producer
+        - type: inflight-load-producer
+        - type: prefix-cache-affinity-filter
+        - type: token-load-scorer
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: prefix-cache-affinity-filter
+          - pluginRef: token-load-scorer

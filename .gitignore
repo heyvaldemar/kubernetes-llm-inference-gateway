@@ -1,0 +1,7 @@
+.kubeconfig
+results/
+*.log
+*.json
+!**/package.json
+.DS_Store
+__pycache__/

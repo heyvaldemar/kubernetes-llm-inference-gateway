@@ -1,0 +1,6 @@
+# One node: the comparison is between two ways of routing the same four
+# model servers, so it needs no more than the node they share.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

@@ -1,0 +1,6 @@
+# file	old	new	what the tests must notice
+"deploy/router-values.yaml"	"        - type: token-load-scorer\n        schedulingProfiles:\n        - name: default\n          plugins:\n          - pluginRef: prefix-cache-affinity-filter\n          - pluginRef: token-load-scorer\n"	"        - type: token-load-scorer\n        - type: random-picker\n        schedulingProfiles:\n        - name: default\n          plugins:\n          - pluginRef: random-picker\n"	"the router picks a replica at random, as round-robin does"
+"deploy/model-server.yaml"	"            - --enable-kvcache\n"	""	"the model servers keep no prefix cache"
+"deploy/router-values.yaml"	"      app: model-server\n"	"      app: model-servers\n"	"the InferencePool selects no model server"
+"tests/e2e.sh"	"ROUNDROBIN=http://model-server-roundrobin:8000"	"ROUNDROBIN=http://router-epp:80"	"the baseline is the router itself, so there is nothing to beat"
+"tests/e2e.sh"	"RATIO_MAX=\"${RATIO_MAX:-0.6}\""	"RATIO_MAX=\"${RATIO_MAX:-0.2}\""	"a threshold no honest run can meet is noticed as a failure, not a pass"

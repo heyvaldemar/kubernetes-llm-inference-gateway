@@ -1,0 +1,85 @@
+name: E2E
+
+# The comparison, on a fresh runner: kind, four simulated model servers, the
+# llm-d router, and the same multi-turn load through the router and through a
+# plain round-robin Service. Every push, every pull request and every day, so
+# a new router, simulator or chart release that changes the result shows up
+# within a day. On main and on the schedule, each check is also shown the
+# breaks it exists for (tests/plants.tsv).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "31 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck scripts/*.sh tests/*.sh
+
+      - name: The load generator compiles
+        run: python3 -I -m py_compile loadgen/loadgen.py tests/plant-violations.py
+
+  e2e:
+    name: Prefix-aware routing against round-robin
+    runs-on: ubuntu-latest
+    needs: lint
+    # The comparison takes about four minutes; the plants run it six more times.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: kind and helm, pinned and checked
+        run: |
+          set -euo pipefail
+          . ./images.lock
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256_AMD64}  kind" | sha256sum -c -
+          install -m 0755 kind "$HOME/.local/bin/kind"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256_AMD64}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          install -m 0755 linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Up
+        run: ./scripts/up.sh
+
+      - name: The comparison
+        env:
+          RESULTS: ${{ runner.temp }}/results
+        run: ./tests/e2e.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: results
+          path: ${{ runner.temp }}/results/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: The tests, shown each break they exist for
+        if: github.event_name != 'pull_request'
+        run: python3 -I -u tests/plant-violations.py -- bash -c './scripts/up.sh >/dev/null 2>&1 && ./tests/e2e.sh >/dev/null 2>&1' | tee -a "$GITHUB_STEP_SUMMARY"

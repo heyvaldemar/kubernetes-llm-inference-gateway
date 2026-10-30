@@ -1,0 +1,14 @@
+# Keeps the pinned GitHub Actions current: every workflow pins its actions to
+# a commit SHA, which never moves on its own. One grouped pull request a week.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
