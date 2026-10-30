@@ -2,6 +2,7 @@
 
 [![E2E](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/workflows/e2e.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/heyvaldemar/kubernetes-llm-inference-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/heyvaldemar/kubernetes-llm-inference-gateway)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16091/badge)](https://www.bestpractices.dev/projects/16091)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 LLM requests are not ordinary HTTP requests. A chat or an agent resends its whole conversation on every turn, so most of each prompt is a prefix some model server has already processed and may still hold in its KV cache. A load balancer that spreads requests evenly sends most turns to a replica that has not seen the conversation, and that replica processes the whole prefix again.
