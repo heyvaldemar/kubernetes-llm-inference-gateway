@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/up.sh` takes `USE_KIND=0` for a cluster it did not make, `MODEL_SERVERS` and `MODEL_SERVER_WORKLOAD` for other model servers, and `ROLLOUT_TIMEOUT`; it restarts the model servers only when they existed before, since new ones have served nothing.
 - `tests/e2e.sh` takes `MODEL`, the model the servers serve.
 
+### Fixed
+
+- **A test piped into `tee` now fails its step.** GitHub runs a step with no `shell` as `bash -e`, without `pipefail`, so `./tests/e2e.sh | tee -a "$GITHUB_STEP_SUMMARY"` took `tee`'s exit status: a failed comparison, a failed scenario or a missed plant would have left the job green. Every workflow now runs its steps as `bash` with `pipefail`. No run on main had hidden a failure: none of the last eight E2E and Failure modes runs on main printed a FAIL, MISSED or STALE line.
+
 ## [1.1.0] - 2026-10-30
 
 ### Added

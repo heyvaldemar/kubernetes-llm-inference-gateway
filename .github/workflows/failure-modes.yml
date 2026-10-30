@@ -42,6 +42,13 @@ concurrency:
 permissions:
   contents: read
 
+# bash with pipefail. A step that pipes a test into tee must fail when the
+# test does; GitHub's default for a run step is `bash -e`, under which tee's
+# exit status is the step's.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   failure-modes:
     name: One replica fails, three ways (${{ matrix.router.name }})
