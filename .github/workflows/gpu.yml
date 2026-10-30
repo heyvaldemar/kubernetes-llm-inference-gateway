@@ -99,6 +99,8 @@ jobs:
 
       - name: The trust, the GPU quota, the prices and the most this run can cost
         id: check
+        env:
+          GPU_ALTERNATIVES: g6.2xlarge g5.xlarge g4dn.xlarge
         run: ./scripts/eks.sh preflight | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Spend or stop here

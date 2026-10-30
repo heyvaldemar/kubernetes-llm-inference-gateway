@@ -156,6 +156,11 @@ if not refused:
     fi
 
     gpu_usd="$(price "$GPU_TYPE")"; node_usd="$(price "$NODE_TYPE")"
+    # Other GPU types under the same quota, priced for the record (ADR 5,
+    # what to run when no zone has an L4).
+    for other in ${GPU_ALTERNATIVES:-}; do
+      say "for the record: $other on demand \$$(price "$other") an hour, $(vcpus "$other" | awk '{print $2}') vCPUs of the same quota"
+    done
     # The most the run can cost: every hourly price for as long as the two
     # billed jobs' timeouts allow, read from the workflow itself.
     python3 -I - "$ROOT/.github/workflows/gpu.yml" "$gpu_usd" "$node_usd" "$GPU_DISK_GIB" "$NODE_DISK_GIB" "$MAX_RUN_USD" \
