@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# eks.sh <preflight|sweep|gpu|check|tokens|diagnose|stop|residue|cost> - the
+# eks.sh <preflight|sweep|unlock|gpu|check|tokens|diagnose|stop|residue|cost> - the
 # parts of the GPU run (ADR 5) that are not Terraform and not the comparison.
 # .github/workflows/gpu.yml calls them; each reads the environment it sets:
 # AWS_REGION, TF_STATE_BUCKET, CLUSTER (the run's cluster name), RUN_ID.
@@ -9,9 +9,9 @@
 #              what already runs, the on-demand prices from AWS's price list,
 #              and the most the run could cost if every job ran to its
 #              timeout, which must stay within MAX_RUN_USD
-#   sweep      destroy what an earlier run of this workflow left: any state
-#              under inference-runs/ older than three hours that still holds
-#              resources
+#   sweep      destroy what an earlier run of this workflow left: any other
+#              state under inference-runs/ that still holds resources
+#   unlock     remove the lock a stopped Terraform left on this run's state
 #   gpu        NVIDIA's device plugin, and the GPU node offering its L4 as four
 #   check      after scripts/up.sh: four model servers, all on the GPU node,
 #              all on the same L4, each serving the pinned model with weights
@@ -62,6 +62,18 @@ if len(prices) != 1:
 print(prices.pop())' "$1"
 }
 
+# unlock <state key>: remove the lock a stopped Terraform left on a state
+# (use_lockfile keeps it beside the state as <key>.tflock). Only for a state
+# no Terraform holds: the run's own once its up job has ended, or an earlier
+# run's. Run 41067783938's apply was killed by its step's timeout and left
+# one, which refused both of the down job's destroys.
+unlock() {
+  if aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$1.tflock" >/dev/null 2>&1; then
+    aws s3 rm --quiet "s3://$TF_STATE_BUCKET/$1.tflock"
+    say "removed the lock a stopped Terraform left on $1"
+  fi
+}
+
 case "${1:-}" in
   preflight)
     : "${AWS_REGION:?}" "${MAX_RUN_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}"
@@ -102,6 +114,23 @@ print("== its trust names %s, one of %d subjects" % (mine, len(subs)))' "$subjec
       exit 1
     fi
 
+    # What AWS refused to launch in the last day, and why: a zone out of g6
+    # capacity shows here before a node group spends twenty minutes on it.
+    # For the record, not a gate.
+    aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances \
+      --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)" --max-items 200 --query 'Events[].CloudTrailEvent' --output json \
+      | python3 -I -c '
+import collections, json, sys
+refused = collections.Counter()
+for e in json.load(sys.stdin) or []:
+    e = json.loads(e)
+    if e.get("errorCode"):
+        refused["%s: %s" % (e["errorCode"], (e.get("errorMessage") or "")[:160])] += 1
+for what, n in refused.most_common(5):
+    print("== launches refused in the last 24 h: %d x %s" % (n, what))
+if not refused:
+    print("== no launch refused in the last 24 h")' || say "CloudTrail could not be read"
+
     gpu_usd="$(price "$GPU_TYPE")"; node_usd="$(price "$NODE_TYPE")"
     # The most the run can cost: every hourly price for as long as the two
     # billed jobs' timeouts allow, read from the workflow itself.
@@ -131,30 +160,37 @@ PY
 
   sweep)
     : "${TF_STATE_BUCKET:?}" "${AWS_REGION:?}"
-    now=$(date +%s); swept=0
+    # Runs of this workflow never overlap (concurrency gpu-run), so any other
+    # run's state that still holds resources is what that run failed to
+    # destroy, and any lock on it is one a stopped Terraform left.
+    swept=0
     # shellcheck disable=SC2016  # the backticks are JMESPath's, not the shell's
     for key in $(aws s3api list-objects-v2 --bucket "$TF_STATE_BUCKET" --prefix "$PREFIX/" \
                    --query 'Contents[?ends_with(Key, `.tfstate`)].Key' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true); do
       run="$(basename "$key" .tfstate)"
       [ "$run" = "${RUN_ID:-}" ] && continue
-      modified="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$key" --query LastModified --output text)"
-      age_h=$(( (now - $(date -d "$modified" +%s)) / 3600 ))
       left="$(aws s3 cp "s3://$TF_STATE_BUCKET/$key" - | python3 -I -c 'import json,sys; print(sum(len(r.get("instances", [])) for r in json.load(sys.stdin).get("resources", []) if r.get("mode") == "managed"))')"
       [ "$left" = 0 ] && continue
-      if [ "$age_h" -lt 3 ]; then say "run $run: $left resources, $age_h h old: still inside its run"; continue; fi
-      say "run $run: $left resources left for $age_h h: destroying"
+      say "run $run: $left resources left: destroying"
       work="$(mktemp -d)"
       aws s3 cp --quiet "s3://$TF_STATE_BUCKET/$PREFIX/$run.tfvars.json" "$work/run.tfvars.json"
       mkdir -p "$work/tf" && cp -r "$ROOT/eks/." "$work/tf/"
       rm -rf "$work/tf/.terraform" "$work/tf/tests"
       printf 'terraform {\n  backend "s3" {}\n}\n' >"$work/tf/ci_backend.tf"
+      unlock "$key"
       terraform -chdir="$work/tf" init -input=false -lockfile=readonly -backend-config="bucket=$TF_STATE_BUCKET" \
         -backend-config="key=$key" -backend-config="region=$AWS_REGION" -backend-config="use_lockfile=true" >/dev/null
-      terraform -chdir="$work/tf" destroy -input=false -auto-approve -var-file="$work/run.tfvars.json" \
-        -var 'operator_cidrs=["198.51.100.1/32"]' >/dev/null
+      destroy() { terraform -chdir="$work/tf" destroy -input=false -auto-approve -var-file="$work/run.tfvars.json" -var 'operator_cidrs=["198.51.100.1/32"]' >/dev/null; }
+      # A node group the state never held keeps the cluster from going.
+      destroy || { CLUSTER="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["cluster_name"])' "$work/run.tfvars.json")" "$0" stop; destroy; }
       say "run $run: destroyed"; swept=$((swept + 1))
     done
     say "swept $swept earlier run(s)"
+    ;;
+
+  unlock)
+    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}"
+    unlock "$PREFIX/$RUN_ID.tfstate"
     ;;
 
   gpu)
@@ -241,6 +277,31 @@ PY
     ;;
 
   diagnose)
+    : "${CLUSTER:?}"
+    # AWS's side first: a node group that never became active says why in
+    # its health and in its Auto Scaling group's launch attempts (run
+    # 41067783938's GPU group spent 19 minutes creating with nothing here
+    # to say why).
+    if aws eks describe-cluster --name "$CLUSTER" --query cluster.status --output text 2>/dev/null; then
+      aws eks update-kubeconfig --name "$CLUSTER" >/dev/null 2>&1 || true
+      for g in $(aws eks list-nodegroups --cluster-name "$CLUSTER" --query nodegroups --output text 2>/dev/null); do
+        aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$g" \
+          --query 'nodegroup.[nodegroupName, status, health.issues]' --output json || true
+        for asg in $(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$g" \
+                       --query 'nodegroup.resources.autoScalingGroups[].name' --output text 2>/dev/null); do
+          aws autoscaling describe-scaling-activities --auto-scaling-group-name "$asg" --max-items 6 \
+            --query 'Activities[].[StartTime, StatusCode, StatusMessage]' --output text || true
+        done
+      done
+    fi
+    aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances \
+      --start-time "$(date -u -d '-90 minutes' +%Y-%m-%dT%H:%M:%SZ)" --max-items 100 --query 'Events[].CloudTrailEvent' --output json 2>/dev/null \
+      | python3 -I -c '
+import json, sys
+for e in json.load(sys.stdin) or []:
+    e = json.loads(e)
+    if e.get("errorCode"):
+        print(e["eventTime"], e["errorCode"], (e.get("errorMessage") or "")[:200])' || true
     kubectl get nodes -o wide -L "$TAG/accelerator" || true
     kubectl get pods -A -o wide || true
     kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
@@ -339,5 +400,5 @@ if total > cap:
 PY
     ;;
 
-  *) echo "usage: eks.sh <preflight|sweep|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
+  *) echo "usage: eks.sh <preflight|sweep|unlock|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
 esac

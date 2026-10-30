@@ -28,7 +28,7 @@ override_data {
 
 override_data {
   target = data.aws_ec2_instance_type_offerings.node["g6.xlarge"]
-  values = { locations = ["us-east-1a", "us-east-1c", "us-east-1d"] }
+  values = { locations = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"] }
 }
 
 variables {
@@ -38,16 +38,30 @@ variables {
   iam_permissions_boundary = "arn:aws:iam::123456789012:policy/platform-validation-boundary"
 }
 
-run "two_zones_that_offer_the_gpu" {
+run "every_zone_that_offers_the_gpu" {
   command = plan
 
   assert {
-    condition     = local.azs == tolist(["us-east-1a", "us-east-1d"])
-    error_message = "two zones that offer both instance types, and never use1-az3"
+    condition     = local.azs == tolist(["us-east-1a", "us-east-1b", "us-east-1d"])
+    error_message = "every zone that offers both instance types, and never use1-az3"
   }
   assert {
-    condition     = length(aws_subnet.public) == 2 && alltrue([for s in aws_subnet.public : s.map_public_ip_on_launch])
-    error_message = "two public subnets, whose nodes get an address for their own traffic out"
+    condition     = length(aws_subnet.public) == 3 && alltrue([for s in aws_subnet.public : s.map_public_ip_on_launch])
+    error_message = "a public subnet in each, whose nodes get an address for their own traffic out"
+  }
+}
+
+run "only_zones_that_offer_the_gpu" {
+  command = plan
+
+  override_data {
+    target = data.aws_ec2_instance_type_offerings.node["g6.xlarge"]
+    values = { locations = ["us-east-1a", "us-east-1c", "us-east-1d"] }
+  }
+
+  assert {
+    condition     = local.azs == tolist(["us-east-1a", "us-east-1d"])
+    error_message = "a zone without the GPU instance type is left out"
   }
 }
 

@@ -1,4 +1,4 @@
-# Two public subnets and an internet gateway, and no NAT gateway: the nodes
+# Public subnets and an internet gateway, and no NAT gateway: the nodes
 # pull vLLM's image from Docker Hub and the model from Hugging Face, about
 # 10 GB a run, which a NAT gateway would bill by the gigabyte. Each node has
 # a public address for its own traffic out, and nothing reaches it from
@@ -23,15 +23,16 @@ data "aws_ec2_instance_type_offerings" "node" {
 }
 
 locals {
-  # Two zones that offer both instance types, so the GPU node group can
-  # launch in either subnet. use1-az3 takes no EKS control plane.
+  # Every zone that offers both instance types, up to four, so the GPU node
+  # group can launch in whichever has an L4 free: g6 capacity in a zone comes
+  # and goes. use1-az3 takes no EKS control plane.
   zone_ids = zipmap(data.aws_availability_zones.available.names, data.aws_availability_zones.available.zone_ids)
   offered = setintersection(
     [for name, id in local.zone_ids : name if id != "use1-az3"],
     data.aws_ec2_instance_type_offerings.node[var.node_instance_type].locations,
     data.aws_ec2_instance_type_offerings.node[var.gpu_instance_type].locations,
   )
-  azs     = slice(sort(tolist(local.offered)), 0, min(2, length(local.offered)))
+  azs     = slice(sort(tolist(local.offered)), 0, min(4, length(local.offered)))
   subnets = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 4, i)]
 }
 
@@ -43,7 +44,7 @@ resource "aws_vpc" "this" {
 
   lifecycle {
     precondition {
-      condition     = length(local.azs) == 2
+      condition     = length(local.azs) >= 2
       error_message = "EKS needs two zones, and fewer than two in the region offer both ${var.node_instance_type} and ${var.gpu_instance_type}."
     }
   }
