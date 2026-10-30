@@ -222,7 +222,8 @@ jobs:
       # Capacity first (ADR 5): run 41067783938's GPU node group waited 19
       # minutes on launches AWS refused for capacity in both of its zones.
       - name: An L4, reserved in the first zone that has one
-        timeout-minutes: 25
+        # Up to six minutes for each of up to four zones.
+        timeout-minutes: 26
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
           VARS: ${{ github.workspace }}/run.tfvars.json
