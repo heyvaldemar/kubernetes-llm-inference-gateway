@@ -5,11 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-10-30
 
 ### Added
 
-- **The comparison on a GPU** (`.github/workflows/gpu.yml`, ADR 5): the same router, values, load, round-robin Service and thresholds as the kind run, on Amazon EKS, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing, and what a million output tokens cost on each route at the on-demand price. Weekly behind `AWS_VALIDATION_ENABLED`, and by hand.
+- **The comparison on a GPU** (`.github/workflows/gpu.yml`, ADR 5): the same router, values, load, round-robin Service and thresholds as the kind run, on Amazon EKS, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing, and what a million output tokens cost on each route at the on-demand price. Weekly on Sunday behind `AWS_VALIDATION_ENABLED`, and by hand. First passed by hand on 2026-10-30, run 41089439304, on the A10G fallback (no L4 in any zone): the router's median time to first token after the first turn 0.50 and 0.42 of round-robin's, 81% of prompt tokens in cache against 42 to 44%, $0.84 a million output tokens against $1.23.
 - **A preflight before anything is billed**: the creation role's trust, the account's GPU quota against what already runs, the prices from the AWS Price List API, refused launches from CloudTrail, any reservation or instance of the project still alive, and the most the run could cost if every billed job ran to its timeout, refused above $1.50 (`scripts/eks.sh`).
 - **Capacity first**: one L4 reserved (a targeted On-Demand Capacity Reservation that ends by itself) before anything else is made, tried in every zone that offers both instance types, round after round for fifteen minutes; with none, the run makes nothing and stops. The cluster and both node groups come from one apply, the GPU node into the reservation.
 - **A teardown that holds when a run breaks**: each apply interrupted before its step's timeout, a stale state lock removed, node groups deleted through the CLI when a destroy fails, the reservation cancelled, a residue check over this run and every earlier one, a sweep of earlier runs' states and orphans, and the cost from each instance's launch and termination and the reservation's start, failed above $1.50.
@@ -48,5 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **What runs is what is pinned**: the test fails if any image in the cluster is not one `images.lock` names by digest, the Envoy the router chart brings by default included, which `deploy/router-values.yaml` pins.
 - **Three decision records**: the simulator before the GPU, the plain Service as baseline, the load and how it is measured.
 
+[1.2.0]: https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/releases/tag/v1.2.0
 [1.1.0]: https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/releases/tag/v1.1.0
 [1.0.0]: https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/releases/tag/v1.0.0
