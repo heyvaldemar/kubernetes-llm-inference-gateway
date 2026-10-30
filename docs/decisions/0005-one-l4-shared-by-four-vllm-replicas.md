@@ -1,6 +1,6 @@
 # 5. The same comparison on one L4, shared by four vLLM replicas
 
-Proposed, 2026-10-30.
+Accepted, 2026-10-30.
 
 ## Context
 
@@ -31,7 +31,7 @@ Routing needs more than one model server, and the comparison the kind run makes 
 
 ## On AWS, 2026-10-30: no L4 to be had
 
-No run has reached the comparison yet. Every billed run was torn down, and the residue check of the last one found nothing of it or of any earlier run. The runs, and what each changed:
+By then no run had reached the comparison. Every billed run was torn down, and the residue check of the last one found nothing of it or of any earlier run. The runs, and what each changed:
 
 | Run | What happened | Cost, on-demand estimate |
 |---|---|---|
@@ -57,6 +57,21 @@ The run asks for one g6.xlarge for fifteen minutes and stops when none comes, at
 | g4dn.xlarge | T4, 16 GB | 4 | $0.526 | no: 16 GB holds four copies of the model with almost no KV cache, and the T4 has no bfloat16 |
 
 The g5.xlarge is the fallback, built as the Decision above says (2026-10-30, after these runs): the same rounds for it when no zone has an L4, the card named, its numbers apart.
+
+## On AWS, 2026-10-30: the first run that passed, on the A10G
+
+[41089439304](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41089439304), by hand, on the fallback: the first round of the reservation found no g6.xlarge and no g5.xlarge in any of the five zones; the second found no g6.xlarge again and a g5.xlarge in us-east-1f, 3.5 minutes after it began. The apply took 11 minutes, the four vLLM replicas 12.5 (the image pulled once, then each started after the one before it), and the check found them all on one `NVIDIA A10G`, driver 580.178.04, holding 17,495 of its 23,028 MiB, each with its weights matching their digests. Every request of the four loads was answered.
+
+| NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone | Round 1 | Round 2 |
+|---|---|---|
+| After the first turn, median: round-robin, router | 254 ms, 126 ms (0.50x) | 325 ms, 136 ms (0.42x) |
+| After the first turn, 90th percentile | 645 ms, 152 ms | 771 ms, 159 ms |
+| Prompt tokens found in a replica's prefix cache | 44%, 81% | 42%, 81% |
+| Time for the load | 20.1 s, 13.9 s | 20.1 s, 13.5 s |
+
+Over both rounds the replicas generated 9,176 output tokens in 40.2 s through round-robin and 9,153 in 27.4 s through the router: at the g5.xlarge's $1.006 an hour, $1.23 and $0.84 a million, and $1.47 and $1.01 with the CPU node and the control plane. The run cost about $0.80, nothing of it was left, and nothing of any earlier run.
+
+Against kind, the ratio is smaller, as the Context expected: a third there, about a half here. The hit rates are the same, 42 to 44% against 81%, so the routing did on vLLM what it does on the simulator; what a hit is worth in time is the GPU's.
 
 ## How to explain this to a customer
 

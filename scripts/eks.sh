@@ -355,7 +355,8 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
       sleep 5
     done
     [ "$offered" = 4 ] || { echo "the GPU node offers '${offered:-nothing}' nvidia.com/gpu, not 4" >&2; exit 1; }
-    say "the GPU node offers its one L4 to the scheduler as 4 nvidia.com/gpu, by time-slicing"
+    itype="$(kubectl get nodes -l "$GPU_LABEL" -o jsonpath='{.items[0].metadata.labels.node\.kubernetes\.io/instance-type}')"
+    say "the GPU node, a $itype, offers its one GPU to the scheduler as 4 nvidia.com/gpu, by time-slicing"
     ;;
 
   check)

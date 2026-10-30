@@ -25,7 +25,7 @@ The first turn of a conversation has nothing cached anywhere, so it costs the sa
 
 **Most of the gain came from going back, not from reading the prompt.** With llm-d's prefix-cache affinity filter removed and only its token-load scorer left, the router still found 74–76% of prompt tokens in cache, at 0.35–0.41 of round-robin's time to first token. The turns of a conversation arrive one at a time, and the replica that has just answered one is, at that moment, the least loaded, so load-based picking sends the next turn back to it. Picking a replica at random takes the router back to round-robin's numbers (41–42% of tokens in cache, 1.12–1.27 of its time). The affinity filter is what keeps a conversation on its replica when that replica is not the least loaded; under this load it adds 3 to 5 points of cache hits (79% against 74–76%).
 
-**What these numbers are about.** The model servers are simulated (below), so the numbers measure the routing, not a model. The simulator charges 1 ms of prefill per uncached token and 10 ms per output token; a GPU with faster prefill gains less time from each cache hit, a longer shared prefix gains more. The ratio is what transfers; the milliseconds and the dollars are for the GPU run below, which has not yet had a GPU to run on.
+**What these numbers are about.** The model servers are simulated (below), so the numbers measure the routing, not a model. The simulator charges 1 ms of prefill per uncached token and 10 ms per output token; a GPU with faster prefill gains less time from each cache hit, a longer shared prefix gains more. The ratio is what transfers; the GPU run below gives the milliseconds and the dollars, and a GPU's ratio is smaller than the simulator's.
 
 ## How it works
 
@@ -83,11 +83,26 @@ The unreachable replica is the opposite case. Through the router, 1 of the 304 r
 
 Without the filter, what ends the sick case is the readiness probe. Both the `InferencePool` and the Service follow the pods' readiness, which turns false after `failureThreshold` failed probes, `periodSeconds` apart, and in the v1.0.0 runs nothing else took the sick replica out. A probe that proves only that the HTTP server answers keeps a replica that fails every completion in the pool, and under load-aware routing the price of that grows with the load.
 
-## On a GPU, once AWS has one
+## On a GPU
 
-[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same thresholds in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. When no zone has an L4, it runs on one NVIDIA A10G (g5.xlarge) instead, and says so beside every number; the two cards' numbers are never compared in one row. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)).
+[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same thresholds in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one GPU by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. The GPU is one NVIDIA L4 (g6.xlarge), or, when no zone has an L4, one NVIDIA A10G (g5.xlarge), named beside every number; the two cards' numbers are never compared in one row. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)).
 
-**It has no numbers yet.** Before anything is billed, a preflight checks the role's trust, the GPU quota and the prices, and refuses a run that could cost more than $1.50. Then the run reserves one L4 before it makes anything else, in each zone in turn. On 2026-10-30 none of the five zones of us-east-1 that offer a g6.xlarge had one for fifteen minutes of asking ([run 41084495170](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41084495170)), so it made nothing and stopped; the earlier runs that day, and what each changed, are in ADR 5. Every run was torn down, and the last residue check found nothing left.
+By hand, on 2026-10-30, [run 41089439304](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41089439304), on **NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone**: the first round found neither card in any of us-east-1's five zones, and the second found no L4 again and a g5.xlarge in us-east-1f. The four replicas held 17,495 of the A10G's 23,028 MiB. Two rounds, each route once per round, the same load as on kind:
+
+| NVIDIA A10G (g5.xlarge), fallback | Round-robin Service | llm-d router |
+|---|---|---|
+| Time to first token, median | 308–333 ms | 135–144 ms |
+| After the first turn, median | 254–325 ms | 126–136 ms |
+| After the first turn, 90th percentile | 645–771 ms | 152–159 ms |
+| Prompt tokens found in a replica's prefix cache | 42–44% | 81% |
+| Time for the whole load | 20.1 s | 13.5–13.9 s |
+| Output tokens a second, both runs | 228 | 333 |
+| A million output tokens, the g5.xlarge alone ($1.006 an hour) | $1.23 | $0.84 |
+| The same, with the CPU node and the control plane ($1.2068 an hour) | $1.47 | $1.01 |
+
+The router's median after the first turn was 0.50 and 0.42 of round-robin's, inside the test's 0.6, against about a third on kind (the first table); its hit rate was 37 and 39 points higher, about what kind shows. On the GPU a cache hit saves only the prefill, which the simulator charges by the token; every step also reads the model's weights, and the four replicas take turns on one GPU, so each waits for the others' kernels whatever was cached. The cost is the price at this load, 16 conversations at a time with answers of up to 24 tokens, on a GPU four servers share: the router answered the same work in two thirds of the time, so each token cost two thirds as much. It is not what the card costs at its capacity.
+
+The run cost about $0.80 at on-demand prices, $0.69 of it the A10G's reservation for 0.69 h, and its residue check found nothing of it and nothing of any earlier run. No L4 run has passed yet; the weekly schedule (Sunday, behind `AWS_VALIDATION_ENABLED`) tries the L4 first every time.
 
 ## Quickstart
 
@@ -105,11 +120,11 @@ Needs Docker, kind, helm and kubectl. Every image is pinned by digest in [`image
 
 Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run, cluster included, takes about three minutes on a GitHub runner; the planted breaks take about thirteen more.
 
-The GPU run is billed to an AWS validation account, at on-demand prices: about $1.03 an hour for the control plane, the g6.xlarge, a CPU node, their addresses and disks ($1.23 with the A10G fallback), and at most $1.43 a run if every job ran to its timeout on the dearer card, which the preflight checks against a $1.50 cap. A run that finds no L4 costs nothing; the ones on 2026-10-30 cost $0.00 to about $0.12 each.
+The GPU run is billed to an AWS validation account, at on-demand prices: about $1.03 an hour for the control plane, the g6.xlarge, a CPU node, their addresses and disks ($1.23 with the A10G fallback), and at most $1.43 a run if every job ran to its timeout on the dearer card, which the preflight checks against a $1.50 cap. The run that passed on 2026-10-30, on the A10G, cost about $0.80. A run that finds no GPU costs nothing; the ones before it that day cost $0.00 to about $0.12 each.
 
 ## What it does not do
 
-- **No GPU number yet.** The GPU run is built and has not had an L4 (above); until a run passes, nothing here is a claim about a GPU. When it does, its numbers are those of four replicas sharing one L4, under this load, not an L4's capacity.
+- **One GPU run, on the fallback card.** The GPU numbers above are one run, by hand, on an A10G, because no zone had an L4; no L4 run has passed yet, and the weekly schedule has not run yet. They are four replicas sharing one GPU under this load, not the card's capacity.
 - **Failure handling is measured, not fixed.** The table above is one failing replica of four, on one node. The comparison runs the v1.0.0 router without the health filter, because that is what the release gives; the filter runs only in the failure scenarios.
 - **One router configuration.** llm-d's other paths (precise prefix-cache routing over KV events, prefill/decode disaggregation, predicted-latency routing) are not exercised.
 - **Not production.** It is a reference: it runs on kind, on a laptop or a CI runner, at no cloud cost, and its GPU run's cluster lives for one run in a validation account and is destroyed by it.
