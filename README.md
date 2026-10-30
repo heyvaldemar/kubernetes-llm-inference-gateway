@@ -85,7 +85,7 @@ Without the filter, what ends the sick case is the readiness probe. Both the `In
 
 ## On a GPU, once AWS has one
 
-[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same thresholds in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)).
+[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same thresholds in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one NVIDIA L4 (g6.xlarge) by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. When no zone has an L4, it runs on one NVIDIA A10G (g5.xlarge) instead, and says so beside every number; the two cards' numbers are never compared in one row. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)).
 
 **It has no numbers yet.** Before anything is billed, a preflight checks the role's trust, the GPU quota and the prices, and refuses a run that could cost more than $1.50. Then the run reserves one L4 before it makes anything else, in each zone in turn. On 2026-10-30 none of the five zones of us-east-1 that offer a g6.xlarge had one for fifteen minutes of asking ([run 41084495170](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41084495170)), so it made nothing and stopped; the earlier runs that day, and what each changed, are in ADR 5. Every run was torn down, and the last residue check found nothing left.
 
@@ -105,7 +105,7 @@ Needs Docker, kind, helm and kubectl. Every image is pinned by digest in [`image
 
 Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run, cluster included, takes about three minutes on a GitHub runner; the planted breaks take about thirteen more.
 
-The GPU run is billed to an AWS validation account, at on-demand prices: about $1.03 an hour for the control plane, the g6.xlarge, a CPU node, their addresses and disks, and at most $1.45 a run if every job ran to its timeout, which the preflight checks against a $1.50 cap. A run that finds no L4 costs nothing; the ones on 2026-10-30 cost $0.00 to about $0.12 each.
+The GPU run is billed to an AWS validation account, at on-demand prices: about $1.03 an hour for the control plane, the g6.xlarge, a CPU node, their addresses and disks ($1.23 with the A10G fallback), and at most $1.43 a run if every job ran to its timeout on the dearer card, which the preflight checks against a $1.50 cap. A run that finds no L4 costs nothing; the ones on 2026-10-30 cost $0.00 to about $0.12 each.
 
 ## What it does not do
 

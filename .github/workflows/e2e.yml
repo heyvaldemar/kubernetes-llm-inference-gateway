@@ -46,6 +46,14 @@ jobs:
       - name: The load generator compiles
         run: python3 -I -m py_compile loadgen/loadgen.py loadgen/probe.py tests/plant-violations.py
 
+      # The GPU run names the card it ran on (ADR 5): an L4, or the A10G
+      # fallback, never one for the other. Shown its breaks here, since the
+      # GPU run itself has none to spare.
+      - name: The GPU run's card check, and the breaks it exists for
+        run: |
+          ./tests/gpu-card.sh
+          PLANTS=tests/gpu-card-plants.tsv python3 -I -u tests/plant-violations.py -- bash tests/gpu-card.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
   # The GPU run's Terraform (ADR 5), checked on a plan against a mocked AWS
   # provider, and its tests shown the breaks they exist for
   # (eks/tests/plants.tsv). No account, no credential, no cost: the run

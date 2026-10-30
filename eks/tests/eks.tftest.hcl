@@ -130,6 +130,36 @@ run "the_l4_is_reserved_before_its_node_exists" {
   }
 }
 
+run "the_fallback_is_one_a10g_in_a_zone_that_offers_it" {
+  command = plan
+  variables {
+    gpu_instance_type = "g5.xlarge"
+    gpu_zone          = "us-east-1b"
+  }
+
+  override_data {
+    target = data.aws_ec2_instance_type_offerings.node["g5.xlarge"]
+    values = { locations = ["us-east-1b", "us-east-1d"] }
+  }
+
+  assert {
+    condition     = local.azs == tolist(["us-east-1b", "us-east-1d"])
+    error_message = "the zones are those that offer the A10G"
+  }
+  assert {
+    condition     = aws_ec2_capacity_reservation.gpu[0].instance_type == "g5.xlarge" && aws_eks_node_group.gpu[0].instance_types == tolist(["g5.xlarge"]) && aws_eks_node_group.gpu[0].ami_type == "AL2023_x86_64_NVIDIA"
+    error_message = "one g5.xlarge reserved and made, on the same NVIDIA image"
+  }
+}
+
+run "a_gpu_the_run_cannot_name_is_refused" {
+  command = plan
+  variables {
+    gpu_instance_type = "g4dn.xlarge"
+  }
+  expect_failures = [var.gpu_instance_type]
+}
+
 run "the_first_apply_makes_no_gpu" {
   command = plan
   variables {

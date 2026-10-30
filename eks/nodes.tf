@@ -101,7 +101,8 @@ resource "aws_eks_node_group" "cpu" {
   depends_on = [aws_eks_addon.before_nodes, aws_iam_role_policy_attachment.node]
 }
 
-# One L4 reserved before its node exists. An On-Demand Capacity Reservation
+# One GPU reserved before its node exists: an L4, or an A10G when no zone
+# has an L4. An On-Demand Capacity Reservation
 # is refused at once in a zone with no g6 capacity, where a node group's
 # launches are refused one by one for twenty minutes (run 41067783938, in
 # us-east-1a and us-east-1b), so scripts/eks.sh reserve tries each zone
@@ -128,11 +129,11 @@ resource "aws_ec2_capacity_reservation" "gpu" {
   }
 }
 
-# EKS's AL2023 image with NVIDIA's driver (580) and container toolkit, one
-# L4 in the reserved zone, tainted so only what asks for a GPU lands on it.
+# EKS's AL2023 image with NVIDIA's driver (580) and container toolkit, the
+# reserved GPU in the reserved zone, tainted so only what asks for a GPU
+# lands on it.
 # NVIDIA's device plugin (deploy/gpu/device-plugin.yaml) offers the GPU to
-# the scheduler as four. Made by the run's second apply, once the
-# reservation holds an L4.
+# the scheduler as four. Made once the reservation holds the GPU.
 resource "aws_eks_node_group" "gpu" {
   count           = var.gpu_zone == "" ? 0 : 1
   cluster_name    = aws_eks_cluster.this.name

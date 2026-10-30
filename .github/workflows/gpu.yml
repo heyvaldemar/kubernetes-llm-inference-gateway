@@ -5,7 +5,9 @@ name: On a GPU
 # load and the same thresholds (tests/e2e.sh), in front of four vLLM replicas
 # of a small open model that share the L4 by time-slicing
 # (deploy/gpu/model-server.yaml), on Amazon EKS. Then what an output token
-# costs on each route, at the on-demand price.
+# costs on each route, at the on-demand price. When no zone has an L4, one
+# NVIDIA A10G (g5.xlarge) instead, named as the fallback wherever the run
+# reports a number.
 #
 # In the validation account aws-eks-reference-platform set up (its ADR 10),
 # through its creation role, which trusts this repository's aws-validation
@@ -61,7 +63,9 @@ env:
   TF_IN_AUTOMATION: "1"
   TERRAFORM_VERSION: 1.16.5
   MAX_RUN_USD: ${{ inputs.max_usd || '1.50' }}
-  GPU_TYPE: g6.xlarge
+  # The GPUs a run may take, in order: the L4, and the A10G when no zone
+  # has an L4 (ADR 5). scripts/eks.sh reserve picks one.
+  GPU_TYPES: g6.xlarge g5.xlarge
   NODE_TYPE: m7i.large
   # eks/variables.tf gpu_disk_gib, and the CPU node's image default.
   GPU_DISK_GIB: "80"
@@ -81,8 +85,7 @@ jobs:
       id-token: write
     outputs:
       spend: ${{ steps.spend.outputs.spend }}
-      gpu_usd: ${{ steps.check.outputs.gpu_usd }}
-      node_usd: ${{ steps.check.outputs.node_usd }}
+      prices: ${{ steps.check.outputs.prices }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -100,7 +103,7 @@ jobs:
       - name: The trust, the GPU quota, the prices and the most this run can cost
         id: check
         env:
-          GPU_ALTERNATIVES: g6.2xlarge g5.xlarge g4dn.xlarge
+          GPU_ALTERNATIVES: g6.2xlarge g4dn.xlarge
         run: ./scripts/eks.sh preflight | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Spend or stop here
@@ -120,8 +123,9 @@ jobs:
     if: needs.preflight.outputs.spend == 'true'
     runs-on: ubuntu-latest
     environment: aws-validation
-    # scripts/eks.sh preflight reads this and down's timeout to bound the cost.
-    timeout-minutes: 55
+    # scripts/eks.sh preflight reads this and down's timeout to bound the
+    # cost: 70 minutes keep the A10G's run under $1.50.
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
@@ -184,7 +188,7 @@ jobs:
               "iam_permissions_boundary": os.environ["BOUNDARY"],
               "operator_cidrs": [sys.argv[1] + "/32"],
               "node_instance_type": os.environ["NODE_TYPE"],
-              "gpu_instance_type": os.environ["GPU_TYPE"],
+              "gpu_instance_type": os.environ["GPU_TYPES"].split()[0],
               "gpu_disk_gib": int(os.environ["GPU_DISK_GIB"]),
               "gpu_zone": "",
               "gpu_reservation_ends": sys.argv[2],
@@ -211,12 +215,14 @@ jobs:
       # minutes on launches AWS refused for capacity in both of its zones. An
       # L4 is reserved before anything else is made; with none in any zone,
       # the run stops here, and a reservation EC2 could not fill bills nothing.
-      - name: An L4, reserved in the first zone that has one
-        # Fifteen minutes of rounds over the zones, and the last round's.
-        timeout-minutes: 26
+      - name: An L4, or an A10G when no zone has one, reserved
+        id: reserve
+        # Ten minutes of rounds over the zones, and the last round's.
+        timeout-minutes: 16
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
           VARS: ${{ github.workspace }}/run.tfvars.json
+          RESERVE_MINUTES: "10"
         run: ./scripts/eks.sh reserve | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The apply is interrupted before its step's timeout could kill it, so
@@ -238,7 +244,7 @@ jobs:
           kubectl -n kube-system rollout status deployment/coredns --timeout=300s
           kubectl get nodes -L node.kubernetes.io/instance-type,topology.kubernetes.io/zone
 
-      - name: The L4, offered as four
+      - name: The GPU, offered as four
         run: ./scripts/eks.sh gpu
 
       # The same script the kind run uses, on this cluster as it is, with
@@ -252,9 +258,10 @@ jobs:
           ROLLOUT_TIMEOUT: 1200s
         run: ./scripts/up.sh
 
-      - name: Four replicas on one L4, each with the pinned weights
+      - name: Four replicas on one GPU, the one reserved, each with the pinned weights
         env:
           RESULTS: ${{ runner.temp }}/results
+          GPU_TYPE: ${{ steps.reserve.outputs.gpu_type }}
         run: ./scripts/eks.sh check | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: The comparison
@@ -266,8 +273,8 @@ jobs:
         if: always() && steps.start.outputs.at != ''
         env:
           RESULTS: ${{ runner.temp }}/results
-          GPU_USD: ${{ needs.preflight.outputs.gpu_usd }}
-          NODE_USD: ${{ needs.preflight.outputs.node_usd }}
+          PRICES: ${{ needs.preflight.outputs.prices }}
+          GPU_TYPE: ${{ steps.reserve.outputs.gpu_type }}
         run: ./scripts/eks.sh tokens | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: What the cluster looked like
@@ -291,7 +298,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: aws-validation
     # scripts/eks.sh preflight reads this and up's timeout to bound the cost.
-    timeout-minutes: 30
+    timeout-minutes: 25
     permissions:
       contents: read
       id-token: write
@@ -361,8 +368,7 @@ jobs:
         env:
           STARTED: ${{ needs.up.outputs.started }}
           APPLIED: ${{ needs.up.outputs.applied }}
-          GPU_USD: ${{ needs.preflight.outputs.gpu_usd }}
-          NODE_USD: ${{ needs.preflight.outputs.node_usd }}
+          PRICES: ${{ needs.preflight.outputs.prices }}
         run: |
           set -o pipefail
           ./scripts/eks.sh cost | tee -a "$GITHUB_STEP_SUMMARY"

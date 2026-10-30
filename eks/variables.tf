@@ -67,16 +67,18 @@ variable "node_instance_type" {
 
 variable "gpu_instance_type" {
   description = <<-EOT
-    The GPU node: one NVIDIA L4, four vCPUs, inside the account's quota for
-    G and VT instances (8 vCPUs in us-east-1 since 2026-10-22, which the
-    flagship's weekly GPU run also uses, on another day).
+    The GPU node: one NVIDIA L4 (g6.xlarge), or one NVIDIA A10G (g5.xlarge)
+    when no zone has an L4 (ADR 5), four vCPUs either way, inside the
+    account's quota for G and VT instances (8 vCPUs in us-east-1 since
+    2026-10-22, which the flagship's weekly GPU run also uses, on another
+    day). scripts/eks.sh reserve sets it to the type it reserved.
   EOT
   type        = string
   default     = "g6.xlarge"
 
   validation {
-    condition     = contains(["g6.xlarge"], var.gpu_instance_type)
-    error_message = "gpu_instance_type is g6.xlarge: one L4, the node scripts/eks.sh prices and the budget allows."
+    condition     = contains(["g6.xlarge", "g5.xlarge"], var.gpu_instance_type)
+    error_message = "gpu_instance_type is g6.xlarge (the L4) or g5.xlarge (the A10G fallback): the GPUs scripts/eks.sh names and prices, inside the budget."
   }
 }
 
@@ -92,9 +94,9 @@ variable "gpu_disk_gib" {
 
 variable "gpu_zone" {
   description = <<-EOT
-    The zone the run's L4 is reserved in, and its node made in. Empty for the
-    run's first apply, which makes the cluster and the CPU node only;
-    scripts/eks.sh reserve sets it to the first zone that gives one.
+    The zone the run's GPU is reserved in, and its node made in. Empty until
+    scripts/eks.sh reserve sets it to the first zone that gives one; with it
+    empty a plan makes no reservation and no GPU node.
   EOT
   type        = string
   default     = ""

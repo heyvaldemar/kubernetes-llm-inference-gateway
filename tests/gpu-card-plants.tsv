@@ -1,0 +1,4 @@
+# file	old	new	what tests/gpu-card.sh must notice
+"scripts/eks.sh"	"\"g5.xlarge:NVIDIA A10G\") echo \"NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone\" ;;"	"\"g5.xlarge:NVIDIA A10G\") echo \"NVIDIA L4 (g6.xlarge)\" ;;"	"a run on the A10G reports an L4"
+"scripts/eks.sh"	"\"g6.xlarge:NVIDIA L4\") echo"	"\"g6.xlarge:NVIDIA L4\"|\"g6.xlarge:NVIDIA A10G\") echo"	"an A10G found on a node that should carry an L4 is called an L4"
+"scripts/eks.sh"	"*) echo \"the GPU node is a $1 and its GPU says '$2': not a card this run knows\" >&2; return 1 ;;"	"*) echo \"NVIDIA L4 (g6.xlarge)\" ;;"	"any GPU at all is called an L4"

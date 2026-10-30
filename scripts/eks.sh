@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# eks.sh <preflight|sweep|unlock|reserve|gpu|check|tokens|diagnose|stop|residue|cost> - the
+# eks.sh <preflight|sweep|unlock|reserve|card|gpu|check|tokens|diagnose|stop|residue|cost> - the
 # parts of the GPU run (ADR 5) that are not Terraform and not the comparison.
 # .github/workflows/gpu.yml calls them; each reads the environment it sets:
 # AWS_REGION, TF_STATE_BUCKET, CLUSTER (the run's cluster name), RUN_ID.
@@ -13,16 +13,18 @@
 #              state under inference-runs/ that still holds resources
 #   unlock     remove the lock a stopped Terraform left on this run's state
 #   reserve    before anything else is made: an On-Demand Capacity
-#              Reservation for one L4, tried in each of the run's zones until
-#              one gives it, imported into the run's state, and the zone
-#              written to the run's variables, so the apply makes the GPU
-#              node in it
-#   gpu        NVIDIA's device plugin, and the GPU node offering its L4 as four
+#              Reservation for one L4, tried in every zone, then for one A10G
+#              when no zone has an L4, round after round; imported into the
+#              run's state, and the zone and type written to the run's
+#              variables, so the apply makes the GPU node there
+#   card       what the results call the GPU of an instance type, from the
+#              name nvidia-smi gives; refused when the two do not match
+#   gpu        NVIDIA's device plugin, and the GPU node offering its GPU as four
 #   check      after scripts/up.sh: four model servers, all on the GPU node,
-#              all on the same L4, each serving the pinned model with weights
-#              that matched their digests
+#              all on the same GPU, the one the reserved type carries, each
+#              serving the pinned model with weights that matched their digests
 #   tokens     what each route's output tokens cost, from the e2e's results
-#              and the prices preflight read
+#              and the prices preflight read, on the card check measured
 #   diagnose   what the cluster looked like, when a step failed
 #   stop       the node groups deleted, any instance of the run terminated
 #              and its reservation cancelled by the AWS CLI: when a destroy
@@ -81,9 +83,21 @@ unlock() {
   fi
 }
 
+# card <instance type> <the GPU nvidia-smi names>: what the run's results
+# call the card, or a refusal when the GPU is not the one that type carries.
+# The A10G is the fallback, taken only when no zone had an L4 (ADR 5), and
+# its numbers are never put in a row with the L4's.
+card() {
+  case "$1:$2" in
+    "g6.xlarge:NVIDIA L4") echo "NVIDIA L4 (g6.xlarge)" ;;
+    "g5.xlarge:NVIDIA A10G") echo "NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone" ;;
+    *) echo "the GPU node is a $1 and its GPU says '$2': not a card this run knows" >&2; return 1 ;;
+  esac
+}
+
 case "${1:-}" in
   preflight)
-    : "${AWS_REGION:?}" "${MAX_RUN_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}"
+    : "${AWS_REGION:?}" "${MAX_RUN_USD:?}" "${GPU_TYPES:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}"
     arn="$(aws sts get-caller-identity --query Arn --output text)"
     role="${arn#*:assumed-role/}"; role="${role%%/*}"
     say "assumed $role through GitHub's OIDC token"
@@ -107,7 +121,8 @@ print("== its trust names %s, one of %d subjects" % (mine, len(subs)))' "$subjec
     # flagship's weekly GPU run uses it too.
     quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code L-DB2E81BA --query Quota.Value --output text)"
     vcpus() { aws ec2 describe-instance-types --instance-types "$@" --query 'InstanceTypes[].[InstanceType, VCpuInfo.DefaultVCpus]' --output text; }
-    need="$(vcpus "$GPU_TYPE" | awk '{print $2}')"
+    # shellcheck disable=SC2086 # one argument per candidate type
+    need="$(vcpus $GPU_TYPES | awk '$2 > n {n = $2} END {print n}')"
     running="$(aws ec2 describe-instances --filters Name=instance-state-name,Values=pending,running \
                  --query 'Reservations[].Instances[].InstanceType' --output text | tr '\t' '\n' | grep -E '^(g|vt)[0-9]' || true)"
     used=0
@@ -115,7 +130,7 @@ print("== its trust names %s, one of %d subjects" % (mine, len(subs)))' "$subjec
       # shellcheck disable=SC2046 # one argument per running type
       used="$(vcpus $(sort -u <<<"$running") | awk 'NR==FNR {v[$1] = $2; next} {s += v[$1]} END {print s + 0}' - <(echo "$running"))"
     fi
-    say "G and VT quota: ${quota%.*} vCPUs; running now: $used; this run needs $need ($GPU_TYPE)"
+    say "G and VT quota: ${quota%.*} vCPUs; running now: $used; this run needs $need ($GPU_TYPES)"
     if [ "$(( ${quota%.*} - used ))" -lt "$need" ]; then
       echo "the GPU quota is in use (${running//$'\n'/ }): another run, the flagship's on its day, holds it; nothing was created" >&2
       exit 1
@@ -151,23 +166,25 @@ if not refused:
     held="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=state,Values=active,pending \
               --query 'CapacityReservations[].CapacityReservationId' --output text)"
     if [ -n "$held" ]; then
-      echo "a reservation of this project is still held ($held): it bills like a running $GPU_TYPE; nothing was created" >&2
+      echo "a reservation of this project is still held ($held): it bills like a running GPU; nothing was created" >&2
       exit 1
     fi
 
-    gpu_usd="$(price "$GPU_TYPE")"; node_usd="$(price "$NODE_TYPE")"
-    # Other GPU types under the same quota, priced for the record (ADR 5,
-    # what to run when no zone has an L4).
+    # Every candidate GPU priced: the run takes the first that a zone gives
+    # (the L4, then the A10G), so the most it can cost is the dearest's.
+    prices="{\"$NODE_TYPE\": $(price "$NODE_TYPE")"
+    for g in $GPU_TYPES; do prices="$prices, \"$g\": $(price "$g")"; done
+    prices="$prices}"
     for other in ${GPU_ALTERNATIVES:-}; do
       say "for the record: $other on demand \$$(price "$other") an hour, $(vcpus "$other" | awk '{print $2}') vCPUs of the same quota"
     done
     # The most the run can cost: every hourly price for as long as the two
     # billed jobs' timeouts allow, read from the workflow itself.
-    python3 -I - "$ROOT/.github/workflows/gpu.yml" "$gpu_usd" "$node_usd" "$GPU_DISK_GIB" "$NODE_DISK_GIB" "$MAX_RUN_USD" \
-      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "${GITHUB_OUTPUT:-/dev/null}" "$GPU_TYPE" "$NODE_TYPE" <<'PY'
-import re, sys
-wf, gpu, node, gpu_disk, node_disk, cap, eks, ipv4, gp3, out, gpu_type, node_type = sys.argv[1:]
-gpu, node, cap, eks, ipv4, gp3 = map(float, (gpu, node, cap, eks, ipv4, gp3))
+    python3 -I - "$ROOT/.github/workflows/gpu.yml" "$prices" "$GPU_TYPES" "$NODE_TYPE" "$GPU_DISK_GIB" "$NODE_DISK_GIB" "$MAX_RUN_USD" \
+      "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "${GITHUB_OUTPUT:-/dev/null}" <<'PY'
+import json, re, sys
+wf, prices, gpu_types, node_type, gpu_disk, node_disk, cap, eks, ipv4, gp3, out = sys.argv[1:]
+prices, cap, eks, ipv4, gp3 = json.loads(prices), float(cap), float(eks), float(ipv4), float(gp3)
 text = open(wf).read()
 def timeout(job):
     m = re.search(r"^  %s:\n(?:    .*\n|\s*\n)*?    timeout-minutes: (\d+)" % job, text, re.M)
@@ -175,13 +192,15 @@ def timeout(job):
         sys.exit("gpu.yml: no timeout-minutes for job %s" % job)
     return int(m.group(1))
 minutes = timeout("up") + timeout("down")
-hourly = eks + gpu + node + 2 * ipv4 + (int(gpu_disk) + int(node_disk)) * gp3 / 730
-worst = hourly * minutes / 60
-print("== on-demand an hour, from the AWS price list: %s $%.4f, %s $%.4f; with the control plane, two addresses and the disks $%.4f"
-      % (gpu_type, gpu, node_type, node, hourly))
-print("== the most this run can cost: %d minutes of jobs at $%.4f an hour, $%.2f, against a cap of $%.2f" % (minutes, hourly, worst, cap))
+worst = 0
+for g in gpu_types.split():
+    hourly = eks + prices[g] + prices[node_type] + 2 * ipv4 + (int(gpu_disk) + int(node_disk)) * gp3 / 730
+    print("== on demand, from the AWS price list: %s $%.4f an hour; with %s ($%.4f), the control plane, two addresses and the disks $%.4f;"
+          " %d minutes of jobs at most, $%.2f" % (g, prices[g], node_type, prices[node_type], hourly, minutes, hourly * minutes / 60))
+    worst = max(worst, hourly * minutes / 60)
+print("== the most this run can cost, on the dearest GPU it may take: $%.2f, against a cap of $%.2f" % (worst, cap))
 with open(out, "a") as f:
-    f.write("gpu_usd=%s\nnode_usd=%s\nworst_usd=%.2f\n" % (gpu, node, worst))
+    f.write("prices=%s\nworst_usd=%.2f\n" % (json.dumps(prices), worst))
 if worst > cap:
     sys.exit("the run could cost $%.2f, more than $%.2f: shorten a timeout or raise the cap" % (worst, cap))
 PY
@@ -234,7 +253,7 @@ PY
     ;;
 
   reserve)
-    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}" "${CLUSTER:?}" "${VARS:?}" "${GPU_TYPE:?}"
+    : "${TF_STATE_BUCKET:?}" "${RUN_ID:?}" "${CLUSTER:?}" "${VARS:?}" "${GPU_TYPES:?}" "${NODE_TYPE:?}"
     # Asked of EC2 directly, then imported, so Terraform destroys it with
     # the rest. EC2 answers a zone with no capacity in one of two ways: it
     # refuses the request (InsufficientInstanceCapacity), or it takes it and
@@ -242,19 +261,23 @@ PY
     # asked through Terraform, which had no answer after five minutes; the
     # reservation it left in us-east-1a had failed. Each zone gets two
     # minutes for an answer and two for the reservation to settle.
-    # The zones eks/network.tf will use, asked of EC2 before anything is
-    # made: available, offering both instance types, and not use1-az3. The
-    # GPU reservation's precondition refuses a zone Terraform would not use.
-    zones="$(python3 -I -c '
+    #
+    # zones <type>: the zones eks/network.tf will use for that GPU type,
+    # asked of EC2 before anything is made: available, offering both it and
+    # the CPU node's type, and not use1-az3. The reservation's precondition
+    # refuses a zone Terraform would not use.
+    zones() {
+      python3 -I -c '
 import json, sys
 zones, gpu, node = (json.loads(a) for a in sys.argv[1:4])
 print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name in gpu and name in node)))' \
-      "$(aws ec2 describe-availability-zones --filters Name=opt-in-status,Values=opt-in-not-required Name=state,Values=available \
-           --query 'AvailabilityZones[].[ZoneName, ZoneId]' --output json)" \
-      "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=$GPU_TYPE" \
-           --query 'InstanceTypeOfferings[].Location' --output json)" \
-      "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=${NODE_TYPE:?}" \
-           --query 'InstanceTypeOfferings[].Location' --output json)")"
+        "$(aws ec2 describe-availability-zones --filters Name=opt-in-status,Values=opt-in-not-required Name=state,Values=available \
+             --query 'AvailabilityZones[].[ZoneName, ZoneId]' --output json)" \
+        "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=$1" \
+             --query 'InstanceTypeOfferings[].Location' --output json)" \
+        "$(aws ec2 describe-instance-type-offerings --location-type availability-zone --filters "Name=instance-type,Values=$NODE_TYPE" \
+             --query 'InstanceTypeOfferings[].Location' --output json)"
+    }
     ends="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_reservation_ends"])' "$VARS")"
     tags="$(python3 -I -c 'import json,sys; t, p, c, r = sys.argv[1:]; print(json.dumps([{"ResourceType": "capacity-reservation", "Tags": [
       {"Key": t + "/project", "Value": p}, {"Key": t + "/cluster", "Value": c}, {"Key": "run-id", "Value": r},
@@ -266,49 +289,59 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
         Name=state,Values=pending,active --query 'CapacityReservations[].CapacityReservationId' --output text
     }
     # Round after round, two minutes apart, for RESERVE_MINUTES: nothing is
-    # billed while no zone has one. Runs 41080156587 and 41083558573 found
-    # none in any zone of us-east-1 on 2026-10-30.
-    deadline=$(( $(date +%s) + ${RESERVE_MINUTES:-15} * 60 ))
+    # billed while no zone has one. Each round asks every zone for the first
+    # type (the L4), and only when none has one, every zone for the next
+    # (the A10G). Runs 41080156587, 41083558573 and 41084495170 found no L4
+    # in any zone of us-east-1 on 2026-10-30.
+    deadline=$(( $(date +%s) + ${RESERVE_MINUTES:-10} * 60 ))
     round=0
     while :; do
-      round=$((round + 1)); refused=""
-      for z in $zones; do
-        [ "$(date +%s)" -lt "$deadline" ] || [ "$round" -eq 1 ] || break
-        out="$(AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
-                 --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
-                 --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)" && rc=0 || rc=$?
-        state=""
-        if [ "$rc" -eq 0 ]; then
-          for _ in $(seq 1 24); do
-            state="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$out" --query 'CapacityReservations[0].State' --output text)"
-            [ "$state" = pending ] || break
-            sleep 5
-          done
-          if [ "$state" = active ]; then
-            python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"]=sys.argv[2]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z"
-            aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
-            terraform -chdir="$ROOT/eks" import -input=false -no-color -var-file="$VARS" 'aws_ec2_capacity_reservation.gpu[0]' "$out" >/dev/null
-            say "one $GPU_TYPE reserved in $z ($out), in round $round${refused:+, after none in$refused}"
-            exit 0
+      round=$((round + 1))
+      for g in $GPU_TYPES; do
+        refused=""
+        for z in $(zones "$g"); do
+          [ "$(date +%s)" -lt "$deadline" ] || [ "$round" -eq 1 ] || break
+          out="$(AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2 create-capacity-reservation --instance-type "$g" --instance-platform Linux/UNIX \
+                   --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
+                   --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)" && rc=0 || rc=$?
+          state=""
+          if [ "$rc" -eq 0 ]; then
+            for _ in $(seq 1 24); do
+              state="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$out" --query 'CapacityReservations[0].State' --output text)"
+              [ "$state" = pending ] || break
+              sleep 5
+            done
+            if [ "$state" = active ]; then
+              python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"], v["gpu_instance_type"] = sys.argv[2:4]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z" "$g"
+              aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
+              terraform -chdir="$ROOT/eks" import -input=false -no-color -var-file="$VARS" 'aws_ec2_capacity_reservation.gpu[0]' "$out" >/dev/null
+              echo "gpu_type=$g" >> "${GITHUB_OUTPUT:-/dev/null}"
+              say "one $g reserved in $z ($out), in round $round${refused:+, after none in$refused}"
+              exit 0
+            fi
+            say "$g in $z: EC2 took the request and the reservation is $state"
+          elif grep -q InsufficientInstanceCapacity <<<"$out"; then
+            :
+          elif [ "$rc" -eq 124 ]; then
+            say "$g in $z: no answer in two minutes"
+          else
+            printf '%s\n' "$out" >&2
+            exit 1
           fi
-          say "$z: EC2 took the request and the reservation is $state"
-        elif grep -q InsufficientInstanceCapacity <<<"$out"; then
-          :
-        elif [ "$rc" -eq 124 ]; then
-          say "$z: no answer in two minutes"
-        else
-          printf '%s\n' "$out" >&2
-          exit 1
-        fi
-        for id in $(held "$z"); do aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null && say "$z: cancelled $id"; done
-        refused="$refused $z"
+          for id in $(held "$z"); do aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null && say "$z: cancelled $id"; done
+          refused="$refused $z"
+        done
+        [ -z "$refused" ] || say "round $round, $(date -u +%H:%M) UTC: no $g capacity in$refused"
       done
-      [ -z "$refused" ] || say "round $round, $(date -u +%H:%M) UTC: no $GPU_TYPE capacity in$refused"
       [ "$(date +%s)" -lt "$deadline" ] || break
       sleep 120
     done
-    echo "no zone of the run ($zones) had a $GPU_TYPE to reserve in ${RESERVE_MINUTES:-15} minutes: no GPU was made, and the run stops here" >&2
+    echo "no zone had any of $GPU_TYPES to reserve in ${RESERVE_MINUTES:-10} minutes: no GPU was made, and the run stops here" >&2
     exit 1
+    ;;
+
+  card)
+    card "${2:?usage: eks.sh card <instance type> <GPU name nvidia-smi gives>}" "${3:?}"
     ;;
 
   gpu)
@@ -326,10 +359,14 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
     ;;
 
   check)
-    : "${MODEL:?}" "${RESULTS:?}"
+    : "${MODEL:?}" "${RESULTS:?}" "${GPU_TYPE:?}"
     mkdir -p "$RESULTS"
     nodes="$(kubectl get nodes -l "$GPU_LABEL" -o jsonpath='{.items[*].metadata.name}')"
     [ "$(wc -w <<<"$nodes")" -eq 1 ] || { echo "expected one GPU node, found: ${nodes:-none}" >&2; exit 1; }
+    # The instance type the node says it is, from EC2 through the kubelet,
+    # against the one the run reserved.
+    itype="$(kubectl get node "$nodes" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')"
+    [ "$itype" = "$GPU_TYPE" ] || { echo "FAIL: the GPU node is a $itype, and the run reserved a $GPU_TYPE" >&2; exit 1; }
     fail=0
     rows=""
     for pod in $(kubectl get pods -l app=model-server -o jsonpath='{.items[*].metadata.name}'); do
@@ -344,7 +381,11 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
       [ "$served" = "$MODEL" ] || { echo "FAIL: $pod serves '$served', not $MODEL" >&2; fail=1; }
       rows="$rows$pod, $gpu"$'\n'
     done
-    python3 -I - "$rows" "$RESULTS/gpu.json" "$MODEL" <<'PY' || fail=1
+    # The card the results name is the one nvidia-smi saw, and it must be
+    # the one the instance type carries.
+    name="$(sed -n '1p' <<<"$rows" | cut -d, -f3 | sed 's/^ *//')"
+    label="$(card "$itype" "$name")" || exit 1
+    python3 -I - "$rows" "$RESULTS/gpu.json" "$MODEL" "$label" "$itype" <<'PY' || fail=1
 import json, sys
 rows = [[c.strip() for c in r.split(",")] for r in sys.argv[1].splitlines() if r.strip()]
 bad = 0
@@ -353,25 +394,32 @@ if len(rows) != 4:
 uuids = {r[1] for r in rows}
 if len(uuids) != 1:
     print("FAIL: the model servers are on %d GPUs, not one shared" % len(uuids)); bad = 1
+if len({r[2] for r in rows}) != 1:
+    print("FAIL: the model servers name more than one GPU"); bad = 1
 pod, uuid, name, used, total, driver = rows[0]
-print("OK: %d model servers serving %s, all on one %s (driver %s), which holds %s of %s MiB"
-      % (len(rows), sys.argv[3], name, driver, used, total))
-json.dump({"gpu": name, "driver": driver, "memory_used_mib": int(used), "memory_total_mib": int(total),
-           "replicas": len(rows), "model": sys.argv[3]}, open(sys.argv[2], "w"))
+print("OK: %d model servers serving %s, all on one %s, driver %s, which holds %s of %s MiB"
+      % (len(rows), sys.argv[3], sys.argv[4], driver, used, total))
+json.dump({"card": sys.argv[4], "gpu": name, "instance_type": sys.argv[5], "driver": driver, "memory_used_mib": int(used),
+           "memory_total_mib": int(total), "replicas": len(rows), "model": sys.argv[3]}, open(sys.argv[2], "w"))
 sys.exit(bad)
 PY
     [ "$fail" -eq 0 ] || exit 1
     ;;
 
   tokens)
-    : "${RESULTS:?}" "${GPU_USD:?}" "${NODE_USD:?}" "${GPU_TYPE:?}"
-    python3 -I - "$RESULTS" "$GPU_USD" "$NODE_USD" "$EKS_USD_PER_HOUR" "$GPU_TYPE" <<'PY'
+    : "${RESULTS:?}" "${PRICES:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}"
+    python3 -I - "$RESULTS" "$PRICES" "$GPU_TYPE" "$NODE_TYPE" "$EKS_USD_PER_HOUR" <<'PY'
 import glob, json, os, sys
-d, gpu, node, eks, gpu_type = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+d, prices, gpu_type, node_type, eks = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3], sys.argv[4], float(sys.argv[5])
+# The card as eks.sh check measured it; a run that never got that far
+# names no card and prices nothing.
+card = json.load(open(os.path.join(d, "gpu.json")))["card"]
+gpu, node = prices[gpu_type], prices[node_type]
 cluster = gpu + node + eks
-out = {"gpu_usd_per_hour": gpu, "cluster_usd_per_hour": round(cluster, 4), "routes": {}}
+out = {"card": card, "gpu_usd_per_hour": gpu, "cluster_usd_per_hour": round(cluster, 4), "routes": {}}
+print("On %s, at $%.4f an hour on demand ($%.4f with the CPU node and the control plane):\n" % (card, gpu, cluster))
 print("| Route | Runs | Requests | Output tokens | Prompt tokens | In cache | Wall time | Output tokens/s "
-      "| A million output tokens, the %s alone | With the CPU node and the control plane |" % gpu_type)
+      "| A million output tokens, the GPU node alone | With the CPU node and the control plane |")
 print("|---|---|---|---|---|---|---|---|---|---|")
 for route, name in (("roundrobin", "Round-robin Service"), ("router", "llm-d router")):
     runs = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(d, route + "-*.json")))]
@@ -508,19 +556,20 @@ for e in json.load(sys.stdin) or []:
     ;;
 
   cost)
-    : "${CLUSTER:?}" "${STARTED:?}" "${GPU_USD:?}" "${NODE_USD:?}" "${GPU_TYPE:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}" "${MAX_RUN_USD:?}"
+    : "${CLUSTER:?}" "${STARTED:?}" "${PRICES:?}" "${NODE_TYPE:?}" "${GPU_DISK_GIB:?}" "${NODE_DISK_GIB:?}" "${MAX_RUN_USD:?}"
     instances="$(aws ec2 describe-instances --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
       --query 'Reservations[].Instances[].[InstanceType, LaunchTime, State.Name, StateTransitionReason]' --output json)"
     reserved="$(aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" \
       --query 'CapacityReservations[].[InstanceType, CreateDate, State]' --output json)"
-    python3 -I - "$instances" "$reserved" "$STARTED" "$(date +%s)" "$GPU_TYPE" "$GPU_USD" "$NODE_TYPE" "$NODE_USD" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
+    python3 -I - "$instances" "$reserved" "$STARTED" "$(date +%s)" "$PRICES" "-" "$NODE_TYPE" "-" "$GPU_DISK_GIB" "$NODE_DISK_GIB" \
       "$EKS_USD_PER_HOUR" "$IPV4_USD_PER_HOUR" "$GP3_USD_PER_GB_MONTH" "$MAX_RUN_USD" "${APPLIED:-}" <<'PY'
 import datetime as dt, json, re, sys
 instances, reserved = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 started, now = int(sys.argv[3]), int(sys.argv[4])
-gpu_type, gpu, node_type, node = sys.argv[5], float(sys.argv[6]), sys.argv[7], float(sys.argv[8])
-disk = {gpu_type: int(sys.argv[9]), node_type: int(sys.argv[10])}
-price = {gpu_type: gpu, node_type: node}
+# Each instance and reservation priced by its own type: the run takes the
+# L4 or, when no zone has one, the A10G.
+price, node_type = json.loads(sys.argv[5]), sys.argv[7]
+disk = {t: (int(sys.argv[10]) if t == node_type else int(sys.argv[9])) for t in price}
 eks, ipv4, gp3, cap = map(float, sys.argv[11:15])
 def epoch(s):
     return int(dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
@@ -535,7 +584,7 @@ in_reservation = set()
 failed = sum(1 for _, _, state in reserved if state == "failed")
 if failed:
     # EC2 took these requests and could not fill them, and bills nothing.
-    rows.append(("%d %s reservation(s) EC2 took and could not fill (failed)" % (failed, gpu_type), 0.0, 0.0))
+    rows.append(("%d GPU reservation(s) EC2 took and could not fill (failed)" % failed, 0.0, 0.0))
 for itype, created, state in reserved:
     h = (now - epoch(created)) / 3600
     if state == "failed":
@@ -563,5 +612,5 @@ if total > cap:
 PY
     ;;
 
-  *) echo "usage: eks.sh <preflight|sweep|unlock|reserve|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
+  *) echo "usage: eks.sh <preflight|sweep|unlock|reserve|card|gpu|check|tokens|diagnose|stop|residue|cost>" >&2; exit 2 ;;
 esac
