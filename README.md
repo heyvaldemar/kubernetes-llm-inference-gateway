@@ -51,6 +51,7 @@ The reasoning is in three decision records: why the simulator before the GPU ([A
 
 `tests/e2e.sh` runs the load four times, round-robin and router alternating, each with conversations no cache has seen, and requires:
 
+- every image the cluster runs named, with its digest, in `images.lock`;
 - every request answered, on both routes;
 - through the router, a median time to first token after the first turn of at most 0.6 of round-robin's, in every round;
 - through the router, a cache hit rate at least 20 points above round-robin's, in every round.
