@@ -62,17 +62,17 @@ Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the
 
 A router that picks the least loaded replica also decides where traffic goes when one of them breaks, and the way it breaks decides which way that goes. A replica that cannot be reached holds on to every request it is given, so it looks busy. A replica that answers every request with an instant error holds none, so it looks idle.
 
-`tests/failure-modes.sh` fails one replica of four in three ways and sends the same open-loop probe through both routes: new single-turn requests on a fixed schedule, as from independent users, whatever happened to the ones before ([ADR 4](docs/decisions/0004-failure-modes-are-recorded-not-gated.md)). Local run on kind, 2026-10-30; the weekly CI run measures again.
+`tests/failure-modes.sh` fails one replica of four in three ways and sends the same open-loop probe through both routes: new single-turn requests on a fixed schedule, as from independent users, whatever happened to the ones before ([ADR 4](docs/decisions/0004-failure-modes-are-recorded-not-gated.md)). On a fresh GitHub runner, [run 41012248244](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41012248244), 2026-10-30; it runs again every week.
 
 | One replica of four | Requests a second | llm-d router v1.0.0 | llm-d main build, `endpoint-health-filter` first | Round-robin Service |
 |---|---|---|---|---|
-| Sick: an instant error for every completion, `/health` fine | 10 | 18 of 80 failed (22%) | 5 of 80 (6%) | 23 of 80 (29%) |
-| | 50 | 184 of 400 (46%) | 5 of 400 (1%) | 119 of 400 (30%) |
-| | 150 | 902 of 1200 (75%) | 0 of 1200 | 288 of 1200 (24%) |
-| Unreachable for 6 s, still Ready | 50 | 1 of 304 stalled or failed | 1 of 305 | 62 of 305, up to 4.2 s |
-| Crashed (SIGKILL), restarted by the kubelet in about a second | 50 | 7 of 400 failed | 5 of 400 | 15 of 400 |
+| Sick: an instant error for every completion, `/health` fine | 10 | 23 of 80 failed (29%) | 5 of 80 (6%) | 23 of 80 (29%) |
+| | 50 | 154 of 400 (38%) | 5 of 400 (1%) | 94 of 400 (24%) |
+| | 150 | 902 of 1200 (75%) | 0 of 1200 | 295 of 1200 (25%) |
+| Unreachable for 6 s, still Ready | 50 | 1 of 304 stalled or failed | 2 of 304 | 59 of 303, up to 3.2 s |
+| Crashed (SIGKILL), restarted by the kubelet in about a second | 50 | 6 of 400 failed | 4 of 400 | 2 of 400 |
 
-Each router column is its own run; round-robin's numbers are from the v1.0.0 run, and its other run differed by a few points.
+Each router column is its own job in that run, on its own cluster; round-robin's numbers are from the v1.0.0 job, and the other job's differed by a few points. A crash costs a handful of requests on either route and the count moves from run to run.
 
 **Fast errors look like spare capacity.** At 10 requests a second the router loses what round-robin loses, about a quarter. At 150 it loses three quarters. The healthy replicas are busy, the sick one answers in a millisecond and never is, and token-load scoring ranks it least loaded for nearly every new request. Round-robin stays near a quarter at every rate, because it ignores load in both directions.
 
