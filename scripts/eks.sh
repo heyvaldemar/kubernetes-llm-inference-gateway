@@ -209,6 +209,17 @@ PY
       destroy || { CLUSTER="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["cluster_name"])' "$work/run.tfvars.json")" "$0" stop; destroy; }
       say "run $run: destroyed"; swept=$((swept + 1))
     done
+    # And what no state holds: an earlier run's instance or reservation
+    # that its teardown and its state both missed.
+    # shellcheck disable=SC2016 # the backticks are JMESPath's, not the shell's
+    for owner in $( { aws ec2 describe-instances --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=instance-state-name,Values=pending,running,stopping,stopped \
+                        --query "Reservations[].Instances[].Tags[?Key=='$TAG/cluster'] | [].Value" --output text
+                      aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/project,Values=$PROJECT" Name=state,Values=active,pending \
+                        --query "CapacityReservations[].Tags[?Key=='$TAG/cluster'] | [].Value" --output text; } | tr '\t' '\n' | grep -v -E '^(None)?$' | sort -u); do
+      [ "$owner" = "${CLUSTER:-}" ] && continue
+      say "$owner: an instance or a reservation no state holds"
+      CLUSTER="$owner" "$0" stop; swept=$((swept + 1))
+    done
     say "swept $swept earlier run(s)"
     ;;
 
@@ -427,6 +438,8 @@ for e in json.load(sys.stdin) or []:
 
   residue)
     : "${CLUSTER:?}" "${AWS_REGION:?}"
+    # Many calls in a row: let the CLI ride out throttling.
+    export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8
     # exists <arn>: the tagging API keeps a deleted resource's tags for a
     # while; a resource it lists is asked about directly before it counts.
     exists() {
@@ -441,8 +454,16 @@ for e in json.load(sys.stdin) or []:
         *:volume/*) aws ec2 describe-volumes --volume-ids "$id" >/dev/null 2>&1 ;;
         *:capacity-reservation/*) case "$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$id" --query 'CapacityReservations[0].State' --output text 2>/dev/null)" in
                                     active|pending) true ;; *) false ;; esac ;;
-        *:instance/*) [ "$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != terminated ] \
-                        && aws ec2 describe-instances --instance-ids "$id" >/dev/null 2>&1 ;;
+        # Run 41080156587 counted run 41067783938's terminated node: an
+        # empty answer, most likely a throttled one among the checks, read
+        # as "not terminated". Now only a state EC2 names counts, and one
+        # it does not name is printed, not guessed.
+        *:instance/*) s="$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text 2>&1)" || true
+                      case "$s" in
+                        terminated|*InvalidInstanceID.NotFound*) false ;;
+                        pending|running|shutting-down|stopping|stopped) echo "$id: $s" >&2; true ;;
+                        *) echo "$id: state unknown ($s)" >&2; true ;;
+                      esac ;;
         *) true ;;
       esac
     }
@@ -493,11 +514,13 @@ rows = [("EKS control plane, from the apply to the end of the destroy", eks, (no
 # with the instance inside it or not, and the instance it holds bills
 # nothing more. Priced to the end of the destroy, which ends it.
 in_reservation = set()
+failed = sum(1 for _, _, state in reserved if state == "failed")
+if failed:
+    # EC2 took these requests and could not fill them, and bills nothing.
+    rows.append(("%d %s reservation(s) EC2 took and could not fill (failed)" % (failed, gpu_type), 0.0, 0.0))
 for itype, created, state in reserved:
     h = (now - epoch(created)) / 3600
     if state == "failed":
-        # EC2 could not fill it, and bills nothing for it.
-        rows.append(("one %s asked for, which EC2 could not reserve (failed)" % itype, 0.0, h))
         continue
     rows.append(("one %s reserved, %s, %.2f h, its node inside it" % (itype, state, h), price[itype], h))
     in_reservation.add(itype)
