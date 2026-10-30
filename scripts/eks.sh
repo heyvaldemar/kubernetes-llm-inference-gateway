@@ -260,38 +260,49 @@ print(" ".join(sorted(name for name, zid in zones if zid != "use1-az3" and name 
       aws ec2 describe-capacity-reservations --filters "Name=tag:$TAG/cluster,Values=$CLUSTER" "Name=availability-zone,Values=$1" \
         Name=state,Values=pending,active --query 'CapacityReservations[].CapacityReservationId' --output text
     }
-    refused=""
-    for z in $zones; do
-      out="$(AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
-               --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
-               --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)" && rc=0 || rc=$?
-      state=""
-      if [ "$rc" -eq 0 ]; then
-        for _ in $(seq 1 24); do
-          state="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$out" --query 'CapacityReservations[0].State' --output text)"
-          [ "$state" = pending ] || break
-          sleep 5
-        done
-        if [ "$state" = active ]; then
-          python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"]=sys.argv[2]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z"
-          aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
-          terraform -chdir="$ROOT/eks" import -input=false -no-color -var-file="$VARS" 'aws_ec2_capacity_reservation.gpu[0]' "$out" >/dev/null
-          say "one $GPU_TYPE reserved in $z ($out)${refused:+, after no capacity in$refused}"
-          exit 0
+    # Round after round, two minutes apart, for RESERVE_MINUTES: nothing is
+    # billed while no zone has one. Runs 41080156587 and 41083558573 found
+    # none in any zone of us-east-1 on 2026-10-30.
+    deadline=$(( $(date +%s) + ${RESERVE_MINUTES:-15} * 60 ))
+    round=0
+    while :; do
+      round=$((round + 1)); refused=""
+      for z in $zones; do
+        [ "$(date +%s)" -lt "$deadline" ] || [ "$round" -eq 1 ] || break
+        out="$(AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2 create-capacity-reservation --instance-type "$GPU_TYPE" --instance-platform Linux/UNIX \
+                 --availability-zone "$z" --instance-count 1 --instance-match-criteria targeted --end-date-type limited --end-date "$ends" \
+                 --tag-specifications "$tags" --query CapacityReservation.CapacityReservationId --output text 2>&1)" && rc=0 || rc=$?
+        state=""
+        if [ "$rc" -eq 0 ]; then
+          for _ in $(seq 1 24); do
+            state="$(aws ec2 describe-capacity-reservations --capacity-reservation-ids "$out" --query 'CapacityReservations[0].State' --output text)"
+            [ "$state" = pending ] || break
+            sleep 5
+          done
+          if [ "$state" = active ]; then
+            python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); v["gpu_zone"]=sys.argv[2]; json.dump(v, open(sys.argv[1], "w"), indent=1)' "$VARS" "$z"
+            aws s3 cp --quiet "$VARS" "s3://$TF_STATE_BUCKET/$PREFIX/$RUN_ID.tfvars.json"
+            terraform -chdir="$ROOT/eks" import -input=false -no-color -var-file="$VARS" 'aws_ec2_capacity_reservation.gpu[0]' "$out" >/dev/null
+            say "one $GPU_TYPE reserved in $z ($out), in round $round${refused:+, after none in$refused}"
+            exit 0
+          fi
+          say "$z: EC2 took the request and the reservation is $state"
+        elif grep -q InsufficientInstanceCapacity <<<"$out"; then
+          :
+        elif [ "$rc" -eq 124 ]; then
+          say "$z: no answer in two minutes"
+        else
+          printf '%s\n' "$out" >&2
+          exit 1
         fi
-        say "$z: EC2 took the request and the reservation is $state"
-      elif grep -q InsufficientInstanceCapacity <<<"$out"; then
-        say "$z: no $GPU_TYPE capacity"
-      elif [ "$rc" -eq 124 ]; then
-        say "$z: no answer in two minutes"
-      else
-        printf '%s\n' "$out" >&2
-        exit 1
-      fi
-      for id in $(held "$z"); do aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null && say "$z: cancelled $id"; done
-      refused="$refused $z"
+        for id in $(held "$z"); do aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null && say "$z: cancelled $id"; done
+        refused="$refused $z"
+      done
+      say "round $round, $(date -u +%H:%M) UTC: no $GPU_TYPE capacity in$refused"
+      [ "$(date +%s)" -lt "$deadline" ] || break
+      sleep 120
     done
-    echo "no zone of the run had a $GPU_TYPE to reserve ($zones): no GPU was made, and the run stops here" >&2
+    echo "no zone of the run ($zones) had a $GPU_TYPE to reserve in ${RESERVE_MINUTES:-15} minutes: no GPU was made, and the run stops here" >&2
     exit 1
     ;;
 

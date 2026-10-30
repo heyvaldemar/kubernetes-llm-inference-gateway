@@ -210,8 +210,8 @@ jobs:
       # L4 is reserved before anything else is made; with none in any zone,
       # the run stops here, and a reservation EC2 could not fill bills nothing.
       - name: An L4, reserved in the first zone that has one
-        # Up to four minutes for each of up to five zones.
-        timeout-minutes: 22
+        # Fifteen minutes of rounds over the zones, and the last round's.
+        timeout-minutes: 26
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
           VARS: ${{ github.workspace }}/run.tfvars.json
