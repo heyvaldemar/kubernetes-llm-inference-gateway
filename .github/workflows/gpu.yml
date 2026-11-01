@@ -275,15 +275,17 @@ jobs:
           GPU_TYPE: ${{ steps.reserve.outputs.gpu_type }}
         run: ./scripts/eks.sh check | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # The checks tests/e2e.sh makes on kind, with the time threshold a GPU
-      # gives (ADR 5, 2026-11-01): on the simulator a hit saves 1 ms a token
-      # and the router's median is about a third of round-robin's; on the
-      # first L4 (run 41298441298) it was 0.61 and 0.67, the A10G 0.42 and
-      # 0.50. The hit-rate check is kind's, unchanged.
+      # The checks tests/e2e.sh makes on kind, its time check at the 90th
+      # percentile (ADR 5, 2026-11-01): on one GPU four replicas share, the
+      # median moves with the card more than with the routing; the tail is
+      # where a miss lands. Working routers measured 0.21 to 0.45 there, a
+      # router picking at random 0.99. tests/gpu-judge.sh replays those runs
+      # against these two values on every push. The hit-rate check is kind's.
       - name: The comparison
         env:
           RESULTS: ${{ runner.temp }}/results
-          RATIO_MAX: "0.8"
+          RATIO_PERCENTILE: "90"
+          RATIO_MAX: "0.6"
         run: ./tests/e2e.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: What an output token costs, on each route

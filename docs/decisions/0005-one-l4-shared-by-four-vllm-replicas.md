@@ -81,6 +81,17 @@ That 0.6 was set for kind (ADR 1), where a cache hit saves a millisecond of pref
 
 Decision: the GPU run asks the router's median after the first turn to be at most 0.8 of round-robin's (`RATIO_MAX` in `gpu.yml`); kind keeps 0.6. The hit-rate check, at least 20 points above round-robin's, is kind's and unchanged, and it is the check that does not depend on the card. A router that picks a replica at random measures about 1.0 of round-robin's time and the same hits; to show the GPU threshold that break rather than argue it, a dispatch with `plant: random-picker` layers `tests/gpu-plants/random-picker-values.yaml` over the router's values, the same break `tests/plants.tsv` plants on kind, and that run must fail both checks. "Weekly" waits for a scheduled run that passes.
 
+Then, the same day, the two runs that decision asked for, both on an L4. The planted one, [41319020421](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41319020421), failed both checks: the random-picking router's median was 0.87 and 1.21 of round-robin's, and its hits 42% and 39% against 42% and 44%. The unplanted one, [41322927420](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41322927420), passed: 0.73 and 0.70, 81% against 43% and 45%. So at the median a working router on the L4 measured 0.61 to 0.73 and a broken one 0.87 to 1.21, and 0.8 sat 0.07 from each: a weekly run would turn red by chance, and the time check would let a broken router through by chance. At the 90th percentile the same rounds part far wider:
+
+| Run | Card | Router | Median | 90th percentile | Hits, round-robin and router |
+|---|---|---|---|---|---|
+| 41089439304 | A10G | working | 0.50, 0.42 | 0.24, 0.21 | 44/81%, 42/81% |
+| 41298441298 | L4 | working | 0.60, 0.67 | 0.37, 0.41 | 44/81%, 41/81% |
+| 41322927420 | L4 | working | 0.73, 0.70 | 0.40, 0.45 | 43/81%, 45/81% |
+| 41319020421 | L4 | picks at random | 0.87, 1.21 | 0.99, 0.99 | 42/42%, 44/39% |
+
+The router's median on the L4 sat at 205 to 213 ms in every working round, whatever round-robin did: on a card four replicas share, the median is set by the card's step. The tail is where a request that missed the cache lands, and that is what routing removes. The GPU run's time check is therefore at the 90th percentile, at most 0.6 of round-robin's (`RATIO_PERCENTILE` and `RATIO_MAX` in `gpu.yml`), 0.15 above the slowest working round and 0.39 below the broken ones; kind keeps its median and its 0.6. This replaces the 0.8 above, which never ruled a scheduled run. The saved results of these four runs are in `tests/fixtures/gpu/`, and `tests/gpu-judge.sh` replays them through `tests/e2e.sh`'s judgement with the values it reads from `gpu.yml` on every push: the three working runs must pass, the planted one must fail, and fail on time alone with the hit-rate check switched off. Its own breaks (`tests/gpu-judge-plants.tsv`) are the median back, a threshold the random picker passes, and a judgement that ignores the percentile.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

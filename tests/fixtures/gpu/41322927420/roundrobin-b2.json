@@ -1,0 +1,26 @@
+{
+ "label": "roundrobin",
+ "seed": "b2",
+ "start_unix_ms": 1793549778546,
+ "requests": 192,
+ "ok": 192,
+ "failed": 0,
+ "wall_s": 25.97,
+ "ttft_ms": {
+  "50": 323.0,
+  "90": 607.8,
+  "99": 1211.4
+ },
+ "ttft_later_turns_ms": {
+  "50": 303.7,
+  "90": 514.1,
+  "99": 799.1
+ },
+ "total_ms_p50": 2064.4,
+ "failures": [],
+ "cache_hit_rate": 0.45,
+ "prompt_tokens": 224011,
+ "output_tokens": 4606,
+ "replicas_counted": 4,
+ "job": "complete"
+}

@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The GPU run's time threshold is 0.8, not kind's 0.6** (ADR 5, 2026-11-01). The first scheduled run, 41298441298, got an L4: every request answered, 81% of prompt tokens in cache against 44% and 41%, and the router's median time to first token after the first turn 0.61 and 0.67 of round-robin's, which kind's 0.6 failed. On a GPU a cache hit saves only the prefill, and the share is the card's (0.42 and 0.50 on the A10G). The hit-rate check is unchanged.
+- **The GPU run judges its time at the 90th percentile, at most 0.6 of round-robin's** (ADR 5, 2026-11-01); kind keeps the median at 0.6. The first scheduled run, 41298441298, got an L4 and failed only kind's median check, 0.61 and 0.67, with every request answered and 81% of prompt tokens in cache against 44% and 41%. On a GPU four replicas share, the router's median is the card's step (205 to 213 ms on the L4); the tail is where a miss lands. Working routers measured 0.21 to 0.45 at the 90th percentile, a router planted to pick at random 0.99 (41319020421, which failed both checks). An interim threshold of 0.8 on the median, set the same morning, sat 0.07 from both and was replaced before any scheduled run used it. The hit-rate check is unchanged.
+- `tests/e2e.sh` takes `RATIO_PERCENTILE` (50 by default) and `JUDGE_ONLY=1`, which judges results already saved and runs nothing.
 
 ### Added
 
-- **A planted break for the GPU run**: a dispatch with `plant: random-picker` layers `tests/gpu-plants/random-picker-values.yaml` over the router's values, the same break `tests/plants.tsv` plants on kind, and must fail the comparison.
+- **The GPU run's thresholds tested on every push**: `tests/gpu-judge.sh` replays four GPU runs' saved results (`tests/fixtures/gpu/`) through the judgement with the values it reads from `gpu.yml`; the three working routers must pass, the random-picking one must fail, on time alone too. Three plants (`tests/gpu-judge-plants.tsv`).
+- **A planted break for the GPU run itself**: a dispatch with `plant: random-picker` layers `tests/gpu-plants/random-picker-values.yaml` over the router's values, kind's random-picker plant; run 41319020421 failed as it must.
 
 ## [1.2.0] - 2026-10-30
 

@@ -12,3 +12,6 @@ eks/.terraform/
 eks/ci_backend.tf
 eks/*.tfplan
 eks/*.tfstate*
+
+# Saved results of GPU runs, replayed by tests/gpu-judge.sh
+!tests/fixtures/**/*.json

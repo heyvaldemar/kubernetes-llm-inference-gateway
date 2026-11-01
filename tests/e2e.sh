@@ -18,11 +18,19 @@
 # The thresholds sit well inside what the simulator measures (about a third
 # of the time and twice the hits), so a pass is not luck and a fail means the
 # routing stopped working. tests/plants.tsv shows each check the break it is for.
+#
+# The GPU run (ADR 5) judges its time at RATIO_PERCENTILE 90: on one GPU four
+# replicas share, the median moves with the card more than with the routing,
+# and the tail is where a miss lands. JUDGE_ONLY=1 judges the results already
+# in RESULTS and runs nothing, which is how tests/gpu-judge.sh replays the GPU
+# runs' saved results against gpu.yml's thresholds.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULTS="${RESULTS:-$ROOT/results}"
 RATIO_MAX="${RATIO_MAX:-0.6}"
 HIT_GAIN_MIN="${HIT_GAIN_MIN:-0.2}"
+RATIO_PERCENTILE="${RATIO_PERCENTILE:-50}"
+JUDGE_ONLY="${JUDGE_ONLY:-0}"
 MODEL="${MODEL:-sim/model}"
 mkdir -p "$RESULTS"
 fail=0
@@ -35,28 +43,31 @@ run() {  # run <label> <target> <seed>: one load, its JSON into $RESULTS
   fi
 }
 
-# What runs is what images.lock names, digest and all, including the images a
-# chart brings in its own defaults, which no file in deploy/ shows.
-running="$(kubectl get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u)"
-stray="$(grep -vxF -f <(sed -n 's/^[A-Z0-9_]*_IMAGE=//p' "$ROOT/images.lock") <<<"$running" || true)"
-if [ -z "$running" ]; then
-  bad "no pods running: run scripts/up.sh first"
-elif [ -n "$stray" ]; then
-  bad "images running that images.lock does not pin: $(paste -sd' ' - <<<"$stray")"
-else
-  ok "every image running is pinned in images.lock"
+if [ "$JUDGE_ONLY" != 1 ]; then
+  # What runs is what images.lock names, digest and all, including the images a
+  # chart brings in its own defaults, which no file in deploy/ shows.
+  running="$(kubectl get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u)"
+  stray="$(grep -vxF -f <(sed -n 's/^[A-Z0-9_]*_IMAGE=//p' "$ROOT/images.lock") <<<"$running" || true)"
+  if [ -z "$running" ]; then
+    bad "no pods running: run scripts/up.sh first"
+  elif [ -n "$stray" ]; then
+    bad "images running that images.lock does not pin: $(paste -sd' ' - <<<"$stray")"
+  else
+    ok "every image running is pinned in images.lock"
+  fi
+
+  ROUTER=http://router-epp:80
+  ROUNDROBIN=http://model-server-roundrobin:8000
+  run roundrobin "$ROUNDROBIN" a1
+  run router "$ROUTER" b1
+  run router "$ROUTER" a2
+  run roundrobin "$ROUNDROBIN" b2
 fi
 
-ROUTER=http://router-epp:80
-ROUNDROBIN=http://model-server-roundrobin:8000
-run roundrobin "$ROUNDROBIN" a1
-run router "$ROUTER" b1
-run router "$ROUTER" a2
-run roundrobin "$ROUNDROBIN" b2
-
-python3 -I - "$RESULTS" "$RATIO_MAX" "$HIT_GAIN_MIN" <<'PY' || fail=1
+python3 -I - "$RESULTS" "$RATIO_MAX" "$HIT_GAIN_MIN" "$RATIO_PERCENTILE" <<'PY' || fail=1
 import json, sys, os
-d, ratio_max, gain_min = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+d, ratio_max, gain_min, pct = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+measure = "median" if pct == "50" else f"{pct}th percentile"
 load = lambda n: json.load(open(os.path.join(d, n)))
 rounds = [(load("roundrobin-a1.json"), load("router-b1.json")), (load("roundrobin-b2.json"), load("router-a2.json"))]
 bad = 0
@@ -65,12 +76,12 @@ for i, (rr, rt) in enumerate(rounds, 1):
         if r.get("failed", 1) != 0 or r.get("job") != "complete":
             print(f"FAIL: round {i} {r.get('label')}: {r.get('failed')} failed requests, job {r.get('job')}"); bad = 1
     try:
-        a, b = rr["ttft_later_turns_ms"]["50"], rt["ttft_later_turns_ms"]["50"]
+        a, b = rr["ttft_later_turns_ms"][pct], rt["ttft_later_turns_ms"][pct]
         ha, hb = rr["cache_hit_rate"], rt["cache_hit_rate"]
     except (KeyError, TypeError):
         print(f"FAIL: round {i}: a run has no measurements"); bad = 1; continue
     ratio = b / a
-    line = (f"round {i}: TTFT after the first turn, median: round-robin {a:.0f} ms, router {b:.0f} ms "
+    line = (f"round {i}: TTFT after the first turn, {measure}: round-robin {a:.0f} ms, router {b:.0f} ms "
             f"({ratio:.2f}x); prefix cache hits: round-robin {ha:.0%}, router {hb:.0%}")
     if ratio <= ratio_max:
         print(f"OK: {line}")

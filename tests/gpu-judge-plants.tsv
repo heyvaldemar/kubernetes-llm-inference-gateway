@@ -1,0 +1,4 @@
+# file	old	new	what tests/gpu-judge.sh must notice
+".github/workflows/gpu.yml"	"RATIO_PERCENTILE: \"90\""	"RATIO_PERCENTILE: \"50\""	"the GPU run judges its time at the median, which a working router on an L4 fails"
+".github/workflows/gpu.yml"	"RATIO_MAX: \"0.6\""	"RATIO_MAX: \"1.0\""	"a time threshold a router picking at random passes"
+"tests/e2e.sh"	"a, b = rr[\"ttft_later_turns_ms\"][pct], rt[\"ttft_later_turns_ms\"][pct]"	"a, b = rr[\"ttft_later_turns_ms\"][\"50\"], rt[\"ttft_later_turns_ms\"][\"50\"]"	"the judgement ignores the percentile it is given"

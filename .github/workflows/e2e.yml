@@ -54,6 +54,14 @@ jobs:
           ./tests/gpu-card.sh
           PLANTS=tests/gpu-card-plants.tsv python3 -I -u tests/plant-violations.py -- bash tests/gpu-card.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # The GPU run's thresholds, replayed on the saved results of GPU runs
+      # (tests/fixtures/gpu/): every working router passes, the one planted
+      # to pick at random fails, on time alone too.
+      - name: The GPU run's thresholds, on its saved runs, and the breaks they exist for
+        run: |
+          ./tests/gpu-judge.sh
+          PLANTS=tests/gpu-judge-plants.tsv python3 -I -u tests/plant-violations.py -- bash tests/gpu-judge.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
   # The GPU run's Terraform (ADR 5), checked on a plan against a mocked AWS
   # provider, and its tests shown the breaks they exist for
   # (eks/tests/plants.tsv). No account, no credential, no cost: the run

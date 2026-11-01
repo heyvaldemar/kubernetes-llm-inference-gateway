@@ -1,0 +1,26 @@
+{
+ "label": "router",
+ "seed": "b1",
+ "start_unix_ms": 1793379198161,
+ "requests": 192,
+ "ok": 192,
+ "failed": 0,
+ "wall_s": 13.94,
+ "ttft_ms": {
+  "50": 134.7,
+  "90": 312.1,
+  "99": 1022.1
+ },
+ "ttft_later_turns_ms": {
+  "50": 126.1,
+  "90": 151.8,
+  "99": 170.1
+ },
+ "total_ms_p50": 1000.1,
+ "failures": [],
+ "cache_hit_rate": 0.812,
+ "prompt_tokens": 221571,
+ "output_tokens": 4605,
+ "replicas_counted": 4,
+ "job": "complete"
+}
