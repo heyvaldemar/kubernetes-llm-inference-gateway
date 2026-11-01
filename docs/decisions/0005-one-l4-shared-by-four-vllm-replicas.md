@@ -73,6 +73,14 @@ Over both rounds the replicas generated 9,176 output tokens in 40.2 s through ro
 
 Against kind, the ratio is smaller, as the Context expected: a third there, about a half here. The hit rates are the same, 42 to 44% against 81%, so the routing did on vLLM what it does on the simulator; what a hit is worth in time is the GPU's.
 
+## 2026-11-01: the time threshold on a GPU
+
+The first scheduled run, [41298441298](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41298441298), got an L4 and failed on the time check: the router's median after the first turn was 0.61 and 0.67 of round-robin's (206 and 211 ms against 340 and 314 ms), and the test asked for 0.6 at most. Every other check passed: every request answered, 81% of prompt tokens found in cache against 44% and 41%, every image pinned. The routing worked; the threshold was the simulator's.
+
+That 0.6 was set for kind (ADR 1), where a cache hit saves a millisecond of prefill a token and the router's median is about a third of round-robin's, so a failure meant the routing broke. On a GPU a hit saves only the prefill, every step also reads the weights, and the four replicas take turns on the card. The share a hit saves is the card's: 0.42 and 0.50 on the A10G (41089439304), 0.61 and 0.67 on the L4. At the 90th percentile the router is far ahead on both (0.20 to 0.25 on the A10G, 0.37 and 0.41 on the L4), but the median is the test's measure on kind and stays so here.
+
+Decision: the GPU run asks the router's median after the first turn to be at most 0.8 of round-robin's (`RATIO_MAX` in `gpu.yml`); kind keeps 0.6. The hit-rate check, at least 20 points above round-robin's, is kind's and unchanged, and it is the check that does not depend on the card. A router that picks a replica at random measures about 1.0 of round-robin's time and the same hits; to show the GPU threshold that break rather than argue it, a dispatch with `plant: random-picker` layers `tests/gpu-plants/random-picker-values.yaml` over the router's values, the same break `tests/plants.tsv` plants on kind, and that run must fail both checks. "Weekly" waits for a scheduled run that passes.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

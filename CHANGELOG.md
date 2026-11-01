@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The GPU run's time threshold is 0.8, not kind's 0.6** (ADR 5, 2026-11-01). The first scheduled run, 41298441298, got an L4: every request answered, 81% of prompt tokens in cache against 44% and 41%, and the router's median time to first token after the first turn 0.61 and 0.67 of round-robin's, which kind's 0.6 failed. On a GPU a cache hit saves only the prefill, and the share is the card's (0.42 and 0.50 on the A10G). The hit-rate check is unchanged.
+
+### Added
+
+- **A planted break for the GPU run**: a dispatch with `plant: random-picker` layers `tests/gpu-plants/random-picker-values.yaml` over the router's values, the same break `tests/plants.tsv` plants on kind, and must fail the comparison.
+
 ## [1.2.0] - 2026-10-30
 
 ### Added

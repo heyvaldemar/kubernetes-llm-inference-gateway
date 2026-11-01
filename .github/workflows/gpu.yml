@@ -42,6 +42,12 @@ on:
         required: false
         type: string
         default: "1.50"
+      plant:
+        description: "random-picker runs the comparison against a router that picks at random; that run must fail (ADR 5)"
+        required: false
+        type: choice
+        options: ["none", "random-picker"]
+        default: "none"
 
 permissions:
   contents: read
@@ -256,7 +262,12 @@ jobs:
           MODEL_SERVERS: deploy/gpu/model-server.yaml
           MODEL_SERVER_WORKLOAD: statefulset/model-server
           ROLLOUT_TIMEOUT: 1200s
-        run: ./scripts/up.sh
+          ROUTER_EXTRA_VALUES: ${{ inputs.plant == 'random-picker' && 'tests/gpu-plants/random-picker-values.yaml' || '' }}
+        run: |
+          if [ -n "$ROUTER_EXTRA_VALUES" ]; then
+            echo "Planted: the router picks at random ($ROUTER_EXTRA_VALUES). The comparison must fail." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          ./scripts/up.sh
 
       - name: Four replicas on one GPU, the one reserved, each with the pinned weights
         env:
@@ -264,9 +275,15 @@ jobs:
           GPU_TYPE: ${{ steps.reserve.outputs.gpu_type }}
         run: ./scripts/eks.sh check | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # The checks tests/e2e.sh makes on kind, with the time threshold a GPU
+      # gives (ADR 5, 2026-11-01): on the simulator a hit saves 1 ms a token
+      # and the router's median is about a third of round-robin's; on the
+      # first L4 (run 41298441298) it was 0.61 and 0.67, the A10G 0.42 and
+      # 0.50. The hit-rate check is kind's, unchanged.
       - name: The comparison
         env:
           RESULTS: ${{ runner.temp }}/results
+          RATIO_MAX: "0.8"
         run: ./tests/e2e.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: What an output token costs, on each route

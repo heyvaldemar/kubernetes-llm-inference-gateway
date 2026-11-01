@@ -1,0 +1,21 @@
+# The break the GPU run's comparison exists for, planted on a GPU (ADR 5,
+# 2026-11-01): the router picks a replica at random, as round-robin does,
+# the same break tests/plants.tsv plants on kind. Layered over
+# deploy/router-values.yaml by a dispatch of gpu.yml with plant
+# random-picker; that run must fail both of the comparison's checks.
+router:
+  epp:
+    pluginsCustomConfig:
+      optimized-baseline-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: approx-prefix-cache-producer
+        - type: inflight-load-producer
+        - type: prefix-cache-affinity-filter
+        - type: token-load-scorer
+        - type: random-picker
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: random-picker
