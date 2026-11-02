@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **README**: "What it does not do" counts the five GPU runs that served the model, by card and outcome, and says no weekly GPU result is claimed until a scheduled run passes (next 2026-11-08); it still said one run, on the A10G, with no L4 run passed. "What it costs" gives the 2026-11-01 runs' cost too.
+
 ## [1.3.0] - 2026-11-01
 
 ### Changed
