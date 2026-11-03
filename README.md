@@ -4,6 +4,12 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/heyvaldemar/kubernetes-llm-inference-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/heyvaldemar/kubernetes-llm-inference-gateway)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16091/badge)](https://www.bestpractices.dev/projects/16091)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![e2e, last 30 days](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fheyvaldemar%2Fkubernetes-llm-inference-gateway%2Fstatus%2Fbadge-days.json)](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/blob/status/status.json)
+[![checks](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fheyvaldemar%2Fkubernetes-llm-inference-gateway%2Fstatus%2Fbadge-checks.json)](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/blob/status/status.json)
+[![router TTFT after the first turn](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fheyvaldemar%2Fkubernetes-llm-inference-gateway%2Fstatus%2Fbadge-router-ttft-after-the-first-turn.json)](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/blob/status/status.json)
+[![prefix cache hits](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fheyvaldemar%2Fkubernetes-llm-inference-gateway%2Fstatus%2Fbadge-prefix-cache-hits.json)](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/blob/status/status.json)
+
+The second row of badges is not typed by hand: it is the e2e workflow's last 30 days on main, rewritten after every run by [`.github/workflows/status.yml`](.github/workflows/status.yml) into the [`status`](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/tree/status) branch.
 
 LLM requests are not ordinary HTTP requests. A chat or an agent resends its whole conversation on every turn, so most of each prompt is a prefix some model server has already processed and may still hold in its KV cache. A load balancer that spreads requests evenly sends most turns to a replica that has not seen the conversation, and that replica processes the whole prefix again.
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A live record of the e2e runs**, as kubernetes-postgres-recovery and cypress-cloud-triage-agent keep: `.github/workflows/status.yml` runs `scripts/status.py` after every E2E run on main and daily, and rewrites the one-commit branch `status` with `status.json` (green days of the last 30, the streak, the runs, and the latest run's checks and measurements) and the shields.io badge files the README's second row of badges reads. Only the kind e2e feeds it; the failure-modes and GPU runs do not.
+- `tests/e2e.sh` writes what it printed to `E2E_RESULTS` when that is set: every `OK` and `FAIL` line a check, and two `MEASURED` lines, the router's time to first token after the first turn as a share of round-robin's and both routes' prefix cache hits, low to high over the rounds. The e2e job sets it on the comparison step only, so the plants do not overwrite it, adds the plants' verdict as one more check, and uploads it as `e2e-results`. Each round now also prints an `OK` line when every request was answered; before, only a failure printed one.
+
 ### Changed
 
 - **README**: "What it does not do" counts the five GPU runs that served the model, by card and outcome, and says no weekly GPU result is claimed until a scheduled run passes (next 2026-11-08); it still said one run, on the A10G, with no L4 run passed. "What it costs" gives the 2026-11-01 runs' cost too.
