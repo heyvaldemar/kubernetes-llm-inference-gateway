@@ -126,7 +126,7 @@ Needs Docker, kind, helm, kubectl and python3. Every image this repository deplo
 
 ## What it costs
 
-Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run, cluster included, takes about three minutes on a GitHub runner; the planted breaks take about thirteen more.
+Nothing beyond a machine with Docker: the cluster is kind, the model servers are simulated, and nothing reaches a cloud account. One test run, cluster included, takes about three minutes on a GitHub runner; the eight planted breaks take about fifteen more (run 41579374652).
 
 The GPU run is billed to an AWS validation account, at on-demand prices: about $1.03 an hour for the control plane, the g6.xlarge, a CPU node, their addresses and disks ($1.23 with the A10G fallback), and at most $1.43 a run if every job ran to its timeout on the dearer card, which the preflight checks against a $1.50 cap. The five runs that served the model cost about $0.67 to $0.80 each. A run that finds no GPU costs nothing; the ones on 2026-10-30 before the first pass cost $0.00 to about $0.12 each.
 
