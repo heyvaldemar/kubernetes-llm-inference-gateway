@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **"What it costs" times the planted breaks again**: eight now, about fifteen minutes on a runner (run 41579374652), where it said thirteen for six.
 - **The Quickstart names python3**, which `tests/e2e.sh`, `scripts/run-load.sh` and `tests/failure-modes.sh` run on the host.
 - **"With nothing random in it"**: the simulator's latency parameters are fixed and carry no jitter, but it runs in `random` mode with no seed, so each answer's text and its length, 1 to 24 tokens, are drawn at random, and the prompts of later turns differ by those answers from route to route and run to run. The README says which is which; ADR 1 and ADR 3 have dated corrections, and `loadgen/loadgen.py`'s docstring no longer calls the conversations the same. The mode is unchanged.
+- **The README called an issue merged**: llm-d/llm-d-router#3326 is the issue that asked for the endpoint health filter; the change is pull request #3328, merged on 2026-10-23. The sentence now links both, as `deploy/router-health-filter.yaml` already did.
 - **ADR 5's zones**: a dated correction. The reservation has no limit of four zones; `zones()` in `scripts/eks.sh` takes every zone that offers both instance types except `use1-az3`, and the runs tried five.
 
 ## [1.3.0] - 2026-11-01
