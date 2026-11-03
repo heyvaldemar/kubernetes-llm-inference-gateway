@@ -10,9 +10,11 @@ chat client or an agent's tool loop resends its context. Sessions run
 request streams, so the time to the first content token (TTFT) is measured
 where a user waits for it, and the last line printed is a JSON summary.
 
-The prompts are made from --seed: the same seed gives the same words, so two
-runs against two routes see the same conversations; a different seed gives
-conversations no cache has seen. Standard library only.
+The prompts are made from --seed: the same seed gives the same system prompts
+and user turns, so two runs against two routes send the same words; the
+answers each history carries are the model server's, which the simulator
+draws at random (ADR 1). A different seed gives conversations no cache has
+seen. Standard library only.
 """
 import argparse
 import http.client

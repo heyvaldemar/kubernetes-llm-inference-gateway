@@ -2,10 +2,11 @@ name: E2E
 
 # The comparison, on a fresh runner: kind, four simulated model servers, the
 # llm-d router, and the same multi-turn load through the router and through a
-# plain round-robin Service. Every push, every pull request and every day, so
-# a new router, simulator or chart release that changes the result shows up
-# within a day. On main and on the schedule, each check is also shown the
-# breaks it exists for (tests/plants.tsv).
+# plain round-robin Service. Every push to main, every pull request to main,
+# and every day, so a new router, simulator or chart release that changes
+# the result shows up within a day. On main, on the schedule and on a
+# dispatch, each check is also shown the breaks it exists for
+# (tests/plants.tsv).
 on:
   push:
     branches: [main]

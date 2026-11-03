@@ -280,7 +280,8 @@ jobs:
       # median moves with the card more than with the routing; the tail is
       # where a miss lands. Working routers measured 0.21 to 0.45 there, a
       # router picking at random 0.99. tests/gpu-judge.sh replays those runs
-      # against these two values on every push. The hit-rate check is kind's.
+      # against these two values on every push to main, every pull request to
+      # main, and every day (e2e.yml's lint job). The hit-rate check is kind's.
       - name: The comparison
         env:
           RESULTS: ${{ runner.temp }}/results

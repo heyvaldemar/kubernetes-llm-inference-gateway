@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The README, `SECURITY.md` and `AGENTS.md` claimed more than the image check showed**: they said the test fails if the cluster runs any image `images.lock` does not name, while it read the default namespace alone. They now say what is compared on kind (every namespace) and on EKS (the default namespace; EKS's own pods in `kube-system` and the device plugin are not).
+- **When the E2E workflow runs**: the README, `e2e.yml`, a comment in `gpu.yml`, the Terraform tests and `AGENTS.md` said "every push"; they now say every push to main, every pull request to main, and every day, which is what `e2e.yml` runs on. ADR 5 has a dated correction; released CHANGELOG entries stay as written.
+- **The Quickstart names python3**, which `tests/e2e.sh`, `scripts/run-load.sh` and `tests/failure-modes.sh` run on the host.
+- **"With nothing random in it"**: the simulator's latency parameters are fixed and carry no jitter, but it runs in `random` mode with no seed, so each answer's text and its length, 1 to 24 tokens, are drawn at random, and the prompts of later turns differ by those answers from route to route and run to run. The README says which is which; ADR 1 and ADR 3 have dated corrections, and `loadgen/loadgen.py`'s docstring no longer calls the conversations the same. The mode is unchanged.
+- **ADR 5's zones**: a dated correction. The reservation has no limit of four zones; `zones()` in `scripts/eks.sh` takes every zone that offers both instance types except `use1-az3`, and the runs tried five.
 
 ## [1.3.0] - 2026-11-01
 

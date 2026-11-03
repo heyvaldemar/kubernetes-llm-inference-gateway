@@ -1,6 +1,8 @@
 # What the GPU run's Terraform promises (ADR 5), checked on a plan against a
 # mocked AWS provider: no account, no credentials, no cost. CI runs it on
-# every push (e2e.yml, job "Lint"); the run itself is .github/workflows/gpu.yml.
+# every push to main, every pull request to main, and every day (e2e.yml, job
+# "The GPU run's Terraform, on a plan"); the run itself is
+# .github/workflows/gpu.yml.
 
 mock_provider "aws" {
   mock_data "aws_caller_identity" {

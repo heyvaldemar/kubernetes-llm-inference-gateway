@@ -19,3 +19,7 @@ A benchmark that sends independent single prompts shows no benefit from a prefix
 
 - One fixed shape of traffic. Shorter shared prefixes or more replicas change the size of the gain; the load generator takes `--sessions`, `--turns`, `--system-words` and `--concurrency` to try others, and the tests use the defaults.
 - The simulator's 1024-token default context window is too short for this load; the model servers run with `--max-model-len=8192`, as a real deployment would set.
+
+## 2026-11-03: a correction
+
+"The words come from a seed, so a run is reproducible" holds for the words the load writes, the system prompts and the user turns. The model servers' answers, which every later turn carries, are random in text and length (ADR 1, 2026-11-03), so a run's prompts after the first turn are not reproduced exactly, on either route.

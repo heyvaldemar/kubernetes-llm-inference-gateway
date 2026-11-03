@@ -94,6 +94,11 @@ The router's median on the L4 sat at 205 to 213 ms in every working round, whate
 
 The rule's first live run, [41328394855](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41328394855) the same afternoon, found no L4 in any zone again and passed on the A10G: 0.26 and 0.19 of round-robin's at the 90th percentile, 81% of prompt tokens in cache against 44% and 39%, about $0.77, nothing left.
 
+## 2026-11-03: corrections
+
+- **The zones.** The Decision says the reservation asks "every zone that offers both instance types, up to four". There is no limit: `zones()` in `scripts/eks.sh` lists every zone of the region that offers both the GPU's type and the CPU node's type and is not `use1-az3`, which takes no EKS control plane (`eks/network.tf`), and the runs above tried five, us-east-1a, b, c, d and f.
+- **"On every push".** Above, `tests/gpu-card.sh`, `tests/gpu-judge.sh` and the Terraform tests run in the E2E workflow's lint and Terraform jobs: on every push to main, every pull request to main, and every day, not on a push to another branch.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.
