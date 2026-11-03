@@ -15,7 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The image check reads every namespace on kind.** `tests/e2e.sh` compares the image of every container, init and ephemeral ones included, of every pod in every namespace with `images.lock` when the cluster is kind (a node whose provider ID starts `kind://`), and names the pod beside each image it does not find. kind's own images (the control plane, CoreDNS, kube-proxy, kindnet, the storage provisioner) are in `images.lock` as kind's pods name them, by tag; they come inside kind's node image, now pinned by digest in `cluster/kind.yaml` and named `KIND_NODE_IMAGE` in `images.lock`, and `scripts/up.sh` refuses a `cluster/kind.yaml` that names another node. Two plants: a pod in `kube-system` running an image `images.lock` does not name, and another kind node in `cluster/kind.yaml`. On EKS the check still reads the default namespace only.
 - **README**: "What it does not do" counts the five GPU runs that served the model, by card and outcome, and says no weekly GPU result is claimed until a scheduled run passes (next 2026-11-08); it still said one run, on the A10G, with no L4 run passed. "What it costs" gives the 2026-11-01 runs' cost too.
+
+### Fixed
+
+- **The README, `SECURITY.md` and `AGENTS.md` claimed more than the image check showed**: they said the test fails if the cluster runs any image `images.lock` does not name, while it read the default namespace alone. They now say what is compared on kind (every namespace) and on EKS (the default namespace; EKS's own pods in `kube-system` and the device plugin are not).
 
 ## [1.3.0] - 2026-11-01
 

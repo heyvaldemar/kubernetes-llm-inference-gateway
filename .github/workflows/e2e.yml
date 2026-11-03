@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     # Up and the comparison take about three minutes; the plants run both
-    # seven more times.
+    # again, once untouched and once for each row of tests/plants.tsv.
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -119,7 +119,7 @@ jobs:
         run: ./scripts/up.sh
 
       # E2E_RESULTS on this step only: the plants below run the same script
-      # seven more times, and a copy they wrote would be a plant's.
+      # again for each row, and a copy they wrote would be a plant's.
       - name: The comparison
         env:
           RESULTS: ${{ runner.temp }}/results

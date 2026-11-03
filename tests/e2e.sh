@@ -8,7 +8,9 @@
 # plain Service (kube-proxy picks a replica at random) and once through the
 # llm-d router, twice each, in alternating order and with conversations no
 # cache has seen. It requires:
-#   - every image running in the cluster pinned in images.lock;
+#   - every image a pod runs named in images.lock: on kind, in every
+#     namespace, kind's own included; on any other cluster (the GPU run's
+#     EKS), in the default namespace, where this repository's pods run;
 #   - every request answered, on both routes;
 #   - through the router, a time to first token after the first turn (the
 #     turns a cache can help) of at most RATIO_MAX of round-robin's, at the
@@ -50,16 +52,30 @@ run() {  # run <label> <target> <seed>: one load, its JSON into $RESULTS
 }
 
 if [ "$JUDGE_ONLY" != 1 ]; then
-  # What runs is what images.lock names, digest and all, including the images a
-  # chart brings in its own defaults, which no file in deploy/ shows.
-  running="$(kubectl get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u)"
-  stray="$(grep -vxF -f <(sed -n 's/^[A-Z0-9_]*_IMAGE=//p' "$ROOT/images.lock") <<<"$running" || true)"
+  # What runs is what images.lock names, including the images a chart brings
+  # in its own defaults, which no file in deploy/ shows. On kind (a node whose
+  # provider ID is kind://) that is every pod in every namespace: kind's own
+  # pods name the images its node image carries, and cluster/kind.yaml pins
+  # that image by digest. Elsewhere it is the default namespace: on EKS the
+  # pods in kube-system are the platform's, and the device plugin's.
+  all=""
+  case "$(kubectl get nodes -o jsonpath='{.items[*].spec.providerID}')" in *kind://*) all=1 ;; esac
+  where="${all:+in every namespace}"; where="${where:-in the default namespace}"
+  pods="$(kubectl get pods ${all:+--all-namespaces} -o json)"
+  running="$(python3 -I -c '
+import json, sys
+for p in json.load(sys.stdin)["items"]:
+    s = p["spec"]
+    for c in s.get("initContainers", []) + s.get("containers", []) + s.get("ephemeralContainers", []):
+        print("%s\t%s/%s" % (c["image"], p["metadata"]["namespace"], p["metadata"]["name"]))' <<<"$pods" | sort -u)"
+  stray="$(awk -F'\t' 'NR == FNR {pinned[$0]; next} !($1 in pinned) {print $1 " (" $2 ")"}' \
+    <(sed -n 's/^[A-Z0-9_]*_IMAGE=//p' "$ROOT/images.lock") <(printf '%s\n' "$running") | sort -u)"
   if [ -z "$running" ]; then
     bad "no pods running: run scripts/up.sh first"
   elif [ -n "$stray" ]; then
-    bad "images running that images.lock does not pin: $(paste -sd' ' - <<<"$stray")"
+    bad "images running $where that images.lock does not name: $(paste -sd' ' - <<<"$stray")"
   else
-    ok "every image running is pinned in images.lock"
+    ok "every image running $where is named in images.lock"
   fi
 
   ROUTER=http://router-epp:80

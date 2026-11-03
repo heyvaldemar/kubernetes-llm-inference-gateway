@@ -1,4 +1,5 @@
-# Every image the cluster and the tests run, pinned by digest.
+# Every image the cluster and the tests run: this repository's pinned by
+# digest, kind's own by the digest of the node image that carries them.
 SIM_IMAGE=ghcr.io/llm-d/llm-d-inference-sim:v1.0.0@sha256:1908c421cbb44130a3212934a0dd1e279dacfe3480be93f4c28b45cd29b93ec8
 EPP_IMAGE=ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
 # llm-d's main build, for the endpoint-health-filter no release carries yet
@@ -11,6 +12,20 @@ ENVOY_IMAGE=docker.io/envoyproxy/envoy:distroless-v1.33.2@sha256:85500e28ed088ec
 VLLM_IMAGE=docker.io/vllm/vllm-openai:v0.32.0-x86_64-zstd@sha256:9aa9a68bd05030a676652ebd41221263748acd055ff9f0f223d4b9e710d98b67
 DEVICE_PLUGIN_IMAGE=nvcr.io/nvidia/k8s-device-plugin:v0.20.1@sha256:d279ecdb47b252c4cd96f4224650e9808c36012f6979570c9611ddbc5b0749a7
 PYTHON_IMAGE=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
+# kind's node: kind v0.33.0's default for Kubernetes v1.37.0, from its release
+# notes (cluster/kind.yaml carries the copy kind reads). kind's own pods run
+# the images it carries, preloaded, and name them by tag: those names follow.
+KIND_NODE_IMAGE=kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+# As kind's pods name them (run 41578697911 listed them): the control plane,
+# CoreDNS, kube-proxy, kindnet and the storage provisioner.
+KIND_APISERVER_IMAGE=registry.k8s.io/kube-apiserver:v1.37.0
+KIND_CONTROLLER_MANAGER_IMAGE=registry.k8s.io/kube-controller-manager:v1.37.0
+KIND_SCHEDULER_IMAGE=registry.k8s.io/kube-scheduler:v1.37.0
+KIND_PROXY_IMAGE=registry.k8s.io/kube-proxy:v1.37.0
+KIND_ETCD_IMAGE=registry.k8s.io/etcd:3.7.0-0
+KIND_COREDNS_IMAGE=registry.k8s.io/coredns/coredns:v1.14.6
+KIND_KINDNETD_IMAGE=docker.io/kindest/kindnetd:v20260820-69b56db7
+KIND_LOCAL_PATH_IMAGE=docker.io/kindest/local-path-provisioner:v20260820-69b56db7
 ROUTER_CHART=oci://ghcr.io/llm-d/charts/llm-d-router-standalone
 ROUTER_CHART_VERSION=v1.0.0
 GAIE_VERSION=v1.6.2

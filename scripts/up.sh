@@ -25,6 +25,12 @@ MODEL_SERVER_WORKLOAD="${MODEL_SERVER_WORKLOAD:-deploy/model-server}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 say() { printf '== %s\n' "$*"; }
 
+# The node kind starts is the one images.lock names: its digest fixes the
+# images kind's own pods run, which tests/e2e.sh compares with images.lock.
+if [ "$USE_KIND" = 1 ] && ! grep -qxF "    image: $KIND_NODE_IMAGE" "$ROOT/cluster/kind.yaml"; then
+  echo "cluster/kind.yaml does not name the kind node images.lock pins, $KIND_NODE_IMAGE" >&2; exit 1
+fi
+
 if [ "$USE_KIND" = 1 ] && ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   say "kind cluster $CLUSTER"
   kind create cluster --name "$CLUSTER" --config "$ROOT/cluster/kind.yaml" --wait 120s >/dev/null

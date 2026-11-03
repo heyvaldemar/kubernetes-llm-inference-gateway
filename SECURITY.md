@@ -14,4 +14,4 @@ A vulnerability in the llm-d router, the Endpoint Picker or the simulator belong
 
 ## Credentials
 
-The repository holds no credentials. Every image is pinned by digest in `images.lock`.
+The repository holds no credentials. Every image it deploys is pinned by digest in `images.lock`, and kind's node image by digest in `cluster/kind.yaml`; the images kind's own pods run come inside that node image.

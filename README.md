@@ -58,12 +58,12 @@ The reasoning is in decision records: why the simulator before the GPU ([ADR 1](
 
 `tests/e2e.sh` runs the load four times, round-robin and router alternating, each with conversations no cache has seen, and requires:
 
-- every image the cluster runs named, with its digest, in `images.lock`;
+- every image a pod runs, in every namespace, named in `images.lock`: this repository's with their digests, and kind's own (the control plane, CoreDNS, kube-proxy, kindnet, the storage provisioner) as its pods name them, inside the node image that `cluster/kind.yaml` pins by digest;
 - every request answered, on both routes;
 - through the router, a median time to first token after the first turn of at most 0.6 of round-robin's, in every round;
 - through the router, a cache hit rate at least 20 points above round-robin's, in every round.
 
-Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the router picking a replica at random, model servers with no prefix cache, an `InferencePool` that selects no model server, a "baseline" that is the router itself, a threshold no honest run can meet, and the chart's own Envoy, a tag with no digest. Each must fail the test.
+Each check is shown the break it exists for (`tests/plants.tsv`, run in CI): the router picking a replica at random, model servers with no prefix cache, an `InferencePool` that selects no model server, a "baseline" that is the router itself, a threshold no honest run can meet, the chart's own Envoy, a tag with no digest, a pod in `kube-system` running an image `images.lock` does not name, and a `cluster/kind.yaml` whose node is not the one `images.lock` pins. Each must fail the test.
 
 ## When a replica fails
 
@@ -91,7 +91,7 @@ Without the filter, what ends the sick case is the readiness probe. Both the `In
 
 ## On a GPU
 
-[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same checks in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one GPU by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. The GPU is one NVIDIA L4 (g6.xlarge), or, when no zone has an L4, one NVIDIA A10G (g5.xlarge), named beside every number; the two cards' numbers are never compared in one row. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)).
+[`gpu.yml`](.github/workflows/gpu.yml) runs the same comparison on Amazon EKS: the same router and values, the same round-robin Service, the same load and the same checks in `tests/e2e.sh`, in front of four vLLM v0.32.0 replicas of Qwen2.5-1.5B-Instruct that share one GPU by the device plugin's time-slicing ([`deploy/gpu/`](deploy/gpu/)), and then what a million output tokens cost on each route at the on-demand price. The GPU is one NVIDIA L4 (g6.xlarge), or, when no zone has an L4, one NVIDIA A10G (g5.xlarge), named beside every number; the two cards' numbers are never compared in one row. The model's weights are pinned to a commit of their repository and every file to its sha256, checked in each pod before vLLM starts ([ADR 5](docs/decisions/0005-one-l4-shared-by-four-vllm-replicas.md)). On EKS the image check reads the default namespace only, where the router, the model servers and the load Jobs run: EKS's own pods in `kube-system`, and the device plugin this repository deploys there, are not compared with `images.lock`.
 
 By hand, on 2026-10-30, [run 41089439304](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/41089439304), on **NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone**: the first round found neither card in any of us-east-1's five zones, and the second found no L4 again and a g5.xlarge in us-east-1f. The four replicas held 17,495 of the A10G's 23,028 MiB. Two rounds, each route once per round, the same load as on kind:
 
@@ -122,7 +122,7 @@ The run cost about $0.80 at on-demand prices, $0.69 of it the A10G's reservation
 kind delete cluster --name ilg    # teardown
 ```
 
-Needs Docker, kind, helm and kubectl. Every image is pinned by digest in [`images.lock`](images.lock), and the test fails if the cluster runs any image that file does not name, the ones a chart brings by default included.
+Needs Docker, kind, helm and kubectl. Every image this repository deploys is pinned by digest in [`images.lock`](images.lock), and kind's node image by digest in [`cluster/kind.yaml`](cluster/kind.yaml). On kind the test fails if a pod in any namespace runs an image `images.lock` does not name, the ones a chart brings by default included.
 
 ## What it costs
 
