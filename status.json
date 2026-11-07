@@ -1,0 +1,57 @@
+{
+  "repository": "heyvaldemar/kubernetes-llm-inference-gateway",
+  "workflow": "e2e.yml",
+  "written_at": "2026-11-07T13:56:30Z",
+  "window_days": 30,
+  "days_with_runs": 9,
+  "green_days": 9,
+  "streak_days": 9,
+  "runs": 33,
+  "runs_passed": 33,
+  "latest": {
+    "conclusion": "success",
+    "at": "2026-11-07T11:16:11Z",
+    "url": "https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/42367459259",
+    "commit": "8ede3ca",
+    "checks_passed": 8,
+    "checks_failed": 0,
+    "checks": [
+      {
+        "state": "PASS",
+        "name": "every image running in every namespace is named in images.lock"
+      },
+      {
+        "state": "PASS",
+        "name": "round 1: every request answered, 192 through round-robin, 192 through the router"
+      },
+      {
+        "state": "PASS",
+        "name": "round 1: TTFT after the first turn, median: round-robin 215 ms, router 93 ms (0.43x); prefix cache hits: round-robin 44%, router 79%"
+      },
+      {
+        "state": "PASS",
+        "name": "round 1: the router's hit rate is +36% over round-robin's"
+      },
+      {
+        "state": "PASS",
+        "name": "round 2: every request answered, 192 through round-robin, 192 through the router"
+      },
+      {
+        "state": "PASS",
+        "name": "round 2: TTFT after the first turn, median: round-robin 316 ms, router 91 ms (0.29x); prefix cache hits: round-robin 40%, router 79%"
+      },
+      {
+        "state": "PASS",
+        "name": "round 2: the router's hit rate is +40% over round-robin's"
+      },
+      {
+        "state": "PASS",
+        "name": "every check shown the break it exists for (tests/plants.tsv): 8 plants: 8 caught, 0 missed, 0 stale"
+      }
+    ],
+    "measured": [
+      "router TTFT after the first turn: 0.29\u20130.43x round-robin's (median, 91\u201393 ms against 215\u2013316 ms)",
+      "prefix cache hits: router 79%, round-robin 40\u201344%"
+    ]
+  }
+}
