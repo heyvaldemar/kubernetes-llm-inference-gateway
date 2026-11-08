@@ -99,6 +99,21 @@ The rule's first live run, [41328394855](https://github.com/heyvaldemar/kubernet
 - **The zones.** The Decision says the reservation asks "every zone that offers both instance types, up to four". There is no limit: `zones()` in `scripts/eks.sh` lists every zone of the region that offers both the GPU's type and the CPU node's type and is not `use1-az3`, which takes no EKS control plane (`eks/network.tf`), and the runs above tried five, us-east-1a, b, c, d and f.
 - **"On every push".** Above, `tests/gpu-card.sh`, `tests/gpu-judge.sh` and the Terraform tests run in the E2E workflow's lint and Terraform jobs: on every push to main, every pull request to main, and every day, not on a push to another branch.
 
+## 2026-11-08: the first scheduled pass, and what "weekly" waits for
+
+The second scheduled run, [42472122098](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/42472122098), the first under the 90th-percentile rule, started at 10:36 UTC, seven hours after its cron time, and reserved an **NVIDIA L4 (g6.xlarge)** in us-east-1b in the first round, after none in us-east-1a. It passed every check:
+
+| Round | 90th percentile after the first turn, round-robin and router | Median after the first turn | Hits, round-robin and router |
+|---|---|---|---|
+| 1 | 565 and 220 ms, 0.39 | 276 and 194 ms, 0.71 | 45% and 81% |
+| 2 | 615 and 231 ms, 0.38 | 344 and 212 ms, 0.62 | 39% and 81% |
+
+A million output tokens cost $1.03 through the router against $1.29 through round-robin on the g6.xlarge alone, $1.28 against $1.61 with the CPU node and the control plane. The run cost about $0.67, $0.56 of it the reservation for 0.70 h, and two reservations EC2 took and could not fill cost nothing. The residue check found nothing of it and nothing of any earlier run; the tagging API still listed 11 resources that the direct checks found gone.
+
+Held to kind's median check, this run would have failed again, as the first scheduled run did: 0.71 and 0.62 against 0.6. At the 90th percentile it sat 0.21 and 0.22 under the threshold, inside the 0.21 to 0.45 the working routers measured on 2026-11-01. The router's median on the L4 was 194 and 212 ms, near the card's step that day, while round-robin's moved between 276 and 344 ms.
+
+Decision: one scheduled pass is not a weekly result. "Weekly" is claimed when two scheduled runs in a row pass, each named with its card. A scheduled run that finds no GPU in any zone fails, and the count starts again. Until then the README, the release notes and anything that quotes them say "first scheduled pass on 2026-11-08, run 42472122098, on an NVIDIA L4 (g6.xlarge)". The next scheduled run is Sunday 2026-11-15.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

@@ -41,7 +41,7 @@ A plant quotes the text it breaks, so an edit to that text (the Envoy digest, th
 ## Gates, and why they sit where they do
 
 - **kind: the median at most 0.6, and 20 points of cache hits, in every round** (`tests/e2e.sh`, ADR 1 and 3). The simulator measures about 0.35 and about 38 points, so a failure means the routing broke, not that a run was unlucky.
-- **GPU: the 90th percentile at most 0.6** (`RATIO_PERCENTILE: "90"` and `RATIO_MAX: "0.6"` in `gpu.yml`; the hit-rate check is kind's). On a card four replicas share, the router's median is the card's step, 205 to 213 ms on the L4 whatever was cached; the tail is where a miss lands. Working routers measured 0.21 to 0.45 there and a router picking at random 0.99, so 0.6 sits 0.15 above the slowest working round and 0.39 below the broken ones. An interim 0.8 on the median sat 0.07 from both and was replaced the same day (ADR 5, 2026-11-01). `tests/gpu-judge.sh` replays the four saved runs against the values it reads from `gpu.yml`.
+- **GPU: the 90th percentile at most 0.6** (`RATIO_PERCENTILE: "90"` and `RATIO_MAX: "0.6"` in `gpu.yml`; the hit-rate check is kind's). On a card four replicas share, the router's median is the card's step, 194 to 213 ms on the L4 in every working round so far (2026-11-01 and 2026-11-08) whatever was cached; the tail is where a miss lands. Working routers measured 0.21 to 0.45 there and a router picking at random 0.99, so 0.6 sits 0.15 above the slowest working round and 0.39 below the broken ones. An interim 0.8 on the median sat 0.07 from both and was replaced the same day (ADR 5, 2026-11-01). `tests/gpu-judge.sh` replays the four saved runs against the values it reads from `gpu.yml`.
 - **Failure modes: no gate on the router** (ADR 4). A router release that changes how it treats a failing replica changes the weekly numbers and turns nothing red; reading them is a person's job.
 - **Cost: $1.50 a GPU run** (`MAX_RUN_USD`). The preflight refuses a run that could cost more if every billed job ran to its timeout, reading the up job's 45 minutes and the down job's 25 from `gpu.yml`: $1.43 on the A10G, $1.20 on the L4. The cost step fails a run above it, and the GPU reservation ends by itself 150 minutes after the run starts. A timeout is part of the cost bound.
 
@@ -55,7 +55,7 @@ A number is read from a run and names it. Which run writes what:
 - **failure-modes.yml** (kind; Monday, and on pushes and pull requests that touch its paths): the artifacts `failure-modes-release` and `failure-modes-health-filter`, kept 90 days. No status file.
 - **gpu.yml** (EKS; Sunday, or by hand): the artifact `results-gpu`, kept 90 days, and the run's summary, which holds the card, the token prices and the cost. No status file; nothing of it reaches the `status` branch.
 
-The README, the decision records, the CHANGELOG and the release notes carry numbers copied from the runs they name. A GPU number names its card as `NVIDIA L4 (g6.xlarge)` or `NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone`, and an A10G's numbers never share a row with an L4's. No weekly GPU result is claimed until a scheduled run passes. When runs differ, find what changed (the card, the zone, the runner, an upstream release) before calling it noise: the L4's median is how the GPU threshold moved to the 90th percentile.
+The README, the decision records, the CHANGELOG and the release notes carry numbers copied from the runs they name. A GPU number names its card as `NVIDIA L4 (g6.xlarge)` or `NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone`, and an A10G's numbers never share a row with an L4's. No weekly GPU result is claimed until two scheduled runs in a row pass (ADR 5, 2026-11-08); a scheduled run that finds no GPU fails and starts the count again. The first scheduled pass is 42472122098, 2026-11-08, on an NVIDIA L4 (g6.xlarge), and is written as that. When runs differ, find what changed (the card, the zone, the runner, an upstream release) before calling it noise: the L4's median is how the GPU threshold moved to the 90th percentile.
 
 ## Pins
 
@@ -110,5 +110,5 @@ Plain and specific. No em dashes, no marketing words, no claim the evidence does
 - Make cloud resources outside the existing workflows: no AWS CLI, Terraform or eksctl against any account, and no other cloud, to test a change. kind is where a change is tried.
 - Start `gpu.yml`, or change what lets it run.
 - Put an A10G's number in a row with an L4's, or call a fallback run an L4 run.
-- Claim a weekly GPU result before a scheduled run passes.
+- Claim a weekly GPU result before two scheduled runs in a row pass.
 - Run the comparison's router on llm-d's main build. The comparison measures the router as released; the main build and its health filter belong to `tests/failure-modes.sh` alone.
