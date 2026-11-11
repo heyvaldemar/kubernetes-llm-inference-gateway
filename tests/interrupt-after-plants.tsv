@@ -1,0 +1,10 @@
+# file	old	new	what tests/interrupt-after.sh must notice
+"scripts/interrupt-after.py"	"            send(signal.SIGINT)\n"	"            send(signal.SIGINT)\n            time.sleep(0.06)\n            send(signal.SIGKILL)\n"	"SIGKILL a moment after the SIGINT, as ubuntu-26.04's timeout (uutils 0.10.0) sends it"
+"scripts/interrupt-after.py"	"            send(signal.SIGINT)\n"	"            pass\n"	"no SIGINT at the limit, only the SIGKILL after the grace"
+"scripts/interrupt-after.py"	"            send(signal.SIGKILL)\n"	"            pass\n"	"no SIGKILL when the grace runs out: a command that ignores SIGINT runs on"
+"scripts/interrupt-after.py"	"            os.killpg(child.pid, signum)\n"	"            os.kill(child.pid, signum)\n"	"the signals reach the command but not its process group, so its children outlive it"
+"scripts/interrupt-after.py"	"    if timed_out:\n        return 124\n"	""	"an interrupted command's own status is passed on, so an apply cut off at its limit could report success"
+"scripts/interrupt-after.py"	"    return status if status >= 0 else 128 - status\n"	"    return 0\n"	"a command's own status is lost"
+"scripts/interrupt-after.py"	"    signal.signal(signal.SIGINT, forward)\n    signal.signal(signal.SIGTERM, forward)\n    child = subprocess.Popen(cmd, process_group=0)\n"	"    child = subprocess.Popen(cmd, process_group=0)\n    signal.signal(signal.SIGINT, forward)\n    signal.signal(signal.SIGTERM, forward)\n"	"the command starts before SIGINT is handled, so it inherits SIGINT ignored when this script was started in the background"
+".github/workflows/gpu.yml"	"python3 -I scripts/interrupt-after.py 30m 3m -- terraform -chdir=eks apply"	"timeout -s INT -k 3m 30m terraform -chdir=eks apply"	"gpu.yml applies under coreutils' timeout -s INT -k again"
+"scripts/eks.sh"	"AWS_MAX_ATTEMPTS=2 timeout 2m aws ec2"	"AWS_MAX_ATTEMPTS=2 timeout -k 10s 2m aws ec2"	"a script asks timeout for a kill after the signal"

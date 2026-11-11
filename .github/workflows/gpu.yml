@@ -235,13 +235,17 @@ jobs:
       # Terraform stops on its own, writes what it made to the state and
       # releases the state's lock. Run 41067783938's apply was killed by the
       # step's timeout while the GPU node group was still being created: the
-      # state never held that group, and the lock stayed.
+      # state never held that group, and the lock stayed. SIGINT at 30
+      # minutes, SIGKILL only if Terraform has not ended 3 minutes later, by
+      # scripts/interrupt-after.py: coreutils' timeout on ubuntu-26.04 is
+      # uutils', which sends the SIGKILL a fraction of a second after the
+      # SIGINT (tests/interrupt-after.sh).
       - name: Apply
         id: apply
         timeout-minutes: 34
         run: |
           echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
-          timeout -s INT -k 3m 30m terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
+          python3 -I scripts/interrupt-after.py 30m 3m -- terraform -chdir=eks apply -input=false -auto-approve -var-file="$PWD/run.tfvars.json"
 
       - name: The cluster, from the runner's address
         run: |

@@ -22,7 +22,7 @@ It is a reference, not a product, and nothing says otherwise: no wording about p
 - `scripts/up.sh` restarts the EPP after every `helm upgrade`: the chart puts no checksum of the plugins' ConfigMap on the pod, and without the restart a test of a changed config measures the previous one. The plant for "no prefix-cache affinity" went unnoticed until that line. Keep it.
 - The simulator's flags in `deploy/model-server.yaml` (prefill overhead, prefill per token, inter-token latency, cache size) are what the kind numbers measure. The README's "What these numbers are about" quotes them; change both in one commit.
 - `tests/e2e.sh` prints `OK`, `FAIL` and `MEASURED` lines, and with `E2E_RESULTS` set writes them as the checks and measurements `scripts/status.py` reads. The text before `: ` in a `MEASURED` line names its badge file on the `status` branch (`badge-router-ttft-after-the-first-turn.json`, `badge-prefix-cache-hits.json`), so renaming one breaks a README badge unless the README changes with it. A measured line is `label: value (detail)`, short, with units, and never `X · label: value`: heyvaldemar.com folds that shape into a per-model table.
-- Before pushing, run what needs no cluster: `shellcheck scripts/*.sh tests/*.sh`, `./tests/gpu-card.sh`, `./tests/gpu-judge.sh`, each with its plants (`PLANTS=tests/gpu-judge-plants.tsv python3 -I tests/plant-violations.py -- bash tests/gpu-judge.sh`), and, with Terraform 1.16.5, `terraform -chdir=eks init -backend=false -input=false -lockfile=readonly` then `terraform -chdir=eks test`.
+- Before pushing, run what needs no cluster: `shellcheck scripts/*.sh tests/*.sh`, `./tests/gpu-card.sh`, `./tests/gpu-judge.sh`, `./tests/interrupt-after.sh` (bash 5), each with its plants (`PLANTS=tests/gpu-judge-plants.tsv python3 -I tests/plant-violations.py -- bash tests/gpu-judge.sh`), and, with Terraform 1.16.5, `terraform -chdir=eks init -backend=false -input=false -lockfile=readonly` then `terraform -chdir=eks test`.
 
 ## A check is trusted only after it has failed
 
@@ -34,6 +34,7 @@ A new or changed check ships with the break it exists for, as a row in its plant
 | `tests/failure-plants.tsv` | `tests/failure-modes.sh` | failure-modes `release` job, the same events |
 | `tests/gpu-card-plants.tsv` | `tests/gpu-card.sh` | lint job, every run |
 | `tests/gpu-judge-plants.tsv` | `tests/gpu-judge.sh` | lint job, every run |
+| `tests/interrupt-after-plants.tsv` | `tests/interrupt-after.sh` | lint job, every run |
 | `eks/tests/plants.tsv` | `terraform -chdir=eks test` | Terraform job, every run |
 
 A plant quotes the text it breaks, so an edit to that text (the Envoy digest, the `RATIO_MAX` line in `tests/e2e.sh`, `RATIO_PERCENTILE` and `RATIO_MAX` in `gpu.yml`, a card case in `scripts/eks.sh`) updates the row in the same commit, or the run reports it stale and fails. The GPU run's own break is a dispatch with `plant: random-picker`, which must fail (run 41319020421); only the maintainer starts one. A saved GPU run under `tests/fixtures/gpu/<run id>/` is that run's `results-gpu` artifact unchanged, with an `expect` file: `pass` or `fail`, then what the run was.
@@ -66,7 +67,7 @@ The README, the decision records, the CHANGELOG and the release notes carry numb
 - **The model**: Qwen2.5-1.5B-Instruct at Hugging Face commit `989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, every file the server reads checked against its sha256 in each pod, in `deploy/gpu/model-server.yaml`.
 - **The GPU run's cluster**: Terraform 1.16.5 (`e2e.yml` and `TERRAFORM_VERSION` in `gpu.yml`), the AWS provider in `eks/.terraform.lock.hcl` (`init -lockfile=readonly`), EKS's Kubernetes version in `eks/variables.tf`. The AL2023 NVIDIA node image is EKS's release for that version at apply time, not pinned; ADR 5 names the driver it carried.
 - **Actions** by commit SHA, moved by one grouped Dependabot pull request a week (`.github/dependabot.yml`). `dependabot-automerge.yml` merges it only after its E2E run is green, then dispatches E2E on main.
-- **Not pinned**: kubectl, ShellCheck and python3 come from the runner image.
+- **Not pinned**: kubectl, ShellCheck, python3 and coreutils come from the runner image. On ubuntu-26.04 coreutils are uutils 0.10.0, with GNU's beside them as `gnu`-prefixed commands; `timeout` is uutils' (ADR 5, 2026-11-11).
 
 No script here watches for newer releases; a bump is by hand, with the new digest read from the publisher. When an llm-d release carries the `endpoint-health-filter`, that release replaces the main build in `images.lock` and `deploy/router-health-filter.yaml`, and the experimental flag goes (ADR 4).
 
@@ -109,6 +110,7 @@ Plain and specific. No em dashes, no marketing words, no claim the evidence does
 - Print a secret or a credential, or pass one as a command-line argument. This repository stores none: AWS is reached through OIDC, and `status.yml` hands its token to git through git's environment, not its command line.
 - Make cloud resources outside the existing workflows: no AWS CLI, Terraform or eksctl against any account, and no other cloud, to test a change. kind is where a change is tried.
 - Start `gpu.yml`, or change what lets it run.
+- Give coreutils' `timeout` a signal (`-s`) or a kill after one (`-k`) in a workflow or a script. On ubuntu-26.04 it sends the SIGKILL a fraction of a second after the signal, whatever `-k` says (run 43073469566). `scripts/interrupt-after.py` interrupts, waits, then kills; `tests/interrupt-after.sh` fails on such a call.
 - Put an A10G's number in a row with an L4's, or call a fallback run an L4 run.
 - Claim a weekly GPU result before two scheduled runs in a row pass.
 - Run the comparison's router on llm-d's main build. The comparison measures the router as released; the main build and its health filter belong to `tests/failure-modes.sh` alone.

@@ -114,6 +114,22 @@ Held to kind's median check, this run would have failed again, as the first sche
 
 Decision: one scheduled pass is not a weekly result. "Weekly" is claimed when two scheduled runs in a row pass, each named with its card. A scheduled run that finds no GPU in any zone fails, and the count starts again. Until then the README, the release notes and anything that quotes them say "first scheduled pass on 2026-11-08, run 42472122098, on an NVIDIA L4 (g6.xlarge)". The next scheduled run is Sunday 2026-11-15.
 
+## 2026-11-11: the interrupt, without coreutils' timeout
+
+The Decision says each apply is interrupted before its step's timeout, so Terraform writes its state and releases its lock. Since ubuntu-latest became ubuntu-26.04 that held for the interrupt but not for the time after it. The step ran `timeout -s INT -k 3m 30m terraform -chdir=eks apply`, and that image's `timeout` is uutils coreutils 0.10.0, which sends the SIGKILL a fraction of a second after the SIGINT, whatever `-k` says (uutils/coreutils#15843 and #15768). Run [43073469566](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/43073469566), on runner image ubuntu26 20261101.186.1, gave a command that takes 3 seconds to clean up after a SIGINT two seconds in:
+
+| Under | Status | Ended after | Its cleanup |
+|---|---|---|---|
+| `timeout -s INT -k 3m 2s` (uutils 0.10.0) | 137 | 2006 ms | cut off |
+| `timeout -s INT -k 20s 2s` (uutils 0.10.0) | 137 | 2018 ms | cut off |
+| `timeout -s INT 2s` (uutils 0.10.0, no `-k`) | 124 | 5009 ms | done |
+| `gnutimeout -s INT -k 20s 2s` (GNU coreutils 9.7, on the same image) | 124 | 5008 ms | done |
+| `scripts/interrupt-after.py 2s 20s` | 124 | 5029 ms | done |
+
+No apply has reached its 30 minutes since the interrupt was added: the six that served the model took 11 to 13 minutes. The one that ran out of time, 41067783938's, came before it.
+
+The apply now runs under `scripts/interrupt-after.py 30m 3m`: SIGINT to Terraform's process group at 30 minutes, SIGKILL only if Terraform has not ended 3 minutes later, and GNU timeout's statuses, 124 and 137. It is Python from the runner image and does not depend on which `timeout` an image ships. `tests/interrupt-after.sh` holds it to that on small numbers in the E2E workflow's lint job, shown nine breaks (`tests/interrupt-after-plants.tsv`), one of them uutils' SIGKILL a moment after the SIGINT, and fails if a workflow or a script gives `timeout` a signal or a kill after one again. The step's own timeout stays 34 minutes, and the down job runs whatever the apply did. Not yet run on a GPU: the first is the scheduled run of 2026-11-15.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

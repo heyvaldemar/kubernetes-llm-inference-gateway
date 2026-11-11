@@ -34,7 +34,7 @@ jobs:
   lint:
     name: Lint scripts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,7 +45,7 @@ jobs:
           shellcheck scripts/*.sh tests/*.sh
 
       - name: The load generator compiles
-        run: python3 -I -m py_compile loadgen/loadgen.py loadgen/probe.py tests/plant-violations.py scripts/status.py
+        run: python3 -I -m py_compile loadgen/loadgen.py loadgen/probe.py tests/plant-violations.py scripts/status.py scripts/interrupt-after.py
 
       # The GPU run names the card it ran on (ADR 5): an L4, or the A10G
       # fallback, never one for the other. Shown its breaks here, since the
@@ -62,6 +62,15 @@ jobs:
         run: |
           ./tests/gpu-judge.sh
           PLANTS=tests/gpu-judge-plants.tsv python3 -I -u tests/plant-violations.py -- bash tests/gpu-judge.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The GPU run's apply gets SIGINT at its limit and SIGKILL only after
+      # its grace (ADR 5), from scripts/interrupt-after.py, not from the
+      # runner's timeout, which on ubuntu-26.04 kills right after the SIGINT. Its breaks
+      # take about a minute and a half: each copy waits out a few seconds.
+      - name: The GPU run's apply, interrupted in time, and the breaks it exists for
+        run: |
+          ./tests/interrupt-after.sh
+          PLANTS=tests/interrupt-after-plants.tsv python3 -I -u tests/plant-violations.py -- bash tests/interrupt-after.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The GPU run's Terraform (ADR 5), checked on a plan against a mocked AWS
   # provider, and its tests shown the breaks they exist for
