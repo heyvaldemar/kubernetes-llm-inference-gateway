@@ -9,6 +9,10 @@ chat client or an agent's tool loop resends its context. Sessions run
 --concurrency at a time; the turns of one session run in order. Every
 request streams, so the time to the first content token (TTFT) is measured
 where a user waits for it, and the last line printed is a JSON summary.
+With --records, one JSON line per request comes before it, in the order the
+requests were sent: its session and turn, when it was sent (seconds from the
+start), its time to first token and to the end in ms, its status, and the
+length of the answer in characters.
 
 The prompts are made from --seed: the same seed gives the same system prompts
 and user turns, so two runs against two routes send the same words; the
@@ -90,10 +94,11 @@ def run_session(args, sid, results, lock):
     history = [{"role": "system", "content": f"Session {sid}. " + words(rng, args.system_words)}]
     for turn in range(args.turns):
         history.append({"role": "user", "content": words(rng, args.turn_words)})
+        sent = time.monotonic() - T0
         ttft, total, text, status = stream_chat(args.target, args.model, history, args.max_tokens, args.timeout)
         with lock:
             results.append({"session": sid, "turn": turn, "ttft": ttft, "total": total, "status": status,
-                            "at": time.monotonic() - T0})
+                            "sent": sent, "at": time.monotonic() - T0, "chars": len(text)})
         if status != 200:
             return
         history.append({"role": "assistant", "content": text})
@@ -112,6 +117,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=24)
     ap.add_argument("--seed", default="1")
     ap.add_argument("--timeout", type=float, default=120)
+    ap.add_argument("--records", action="store_true", help="print one JSON line per request before the summary")
     args = ap.parse_args()
 
     global T0
@@ -140,6 +146,12 @@ def main():
         "failures": sorted(([round(r["at"], 2), r["status"], r["turn"]] for r in results
                             if not (r["status"] == 200 and r["ttft"] is not None)), key=lambda f: f[0]),
     }
+    if args.records:
+        ms = lambda s: None if s is None else round(1000 * s, 1)
+        for r in sorted(results, key=lambda r: r["sent"]):
+            print(json.dumps({"session": r["session"], "turn": r["turn"], "sent_s": round(r["sent"], 3),
+                              "ttft_ms": ms(r["ttft"]), "total_ms": ms(r["total"]), "status": r["status"],
+                              "answer_chars": r["chars"]}))
     print(json.dumps(summary))
     return 0 if summary["failed"] == 0 else 1
 

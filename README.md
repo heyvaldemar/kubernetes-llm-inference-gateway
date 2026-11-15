@@ -120,7 +120,7 @@ The run cost about $0.80 at on-demand prices, $0.69 of it the A10G's reservation
 
 ```bash
 ./scripts/up.sh       # kind, the InferencePool CRD, four model servers, the router
-./tests/e2e.sh        # the comparison; RESULTS=<dir> keeps each run's JSON
+./tests/e2e.sh        # the comparison; RESULTS=<dir> keeps each run's JSON and its requests
 ./tests/failure-modes.sh   # one replica fails three ways, both routes
 ./scripts/run-load.sh router http://router-epp:80 any-seed --sessions 64 --turns 8
 kind delete cluster --name ilg    # teardown

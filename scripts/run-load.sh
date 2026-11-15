@@ -9,7 +9,10 @@
 # (vllm:prefix_cache_hits_total / vllm:prefix_cache_queries_total, as deltas
 # over the run), and the prompt and output tokens they counted
 # (vllm:prompt_tokens_total, vllm:generation_tokens_total), which the GPU
-# run prices. Exits non-zero if the job fails or any request failed.
+# run prices, and "replica_counters", those four counts per model-server pod
+# before and after the run, as read. With RECORDS=<file> set, it also writes
+# the load generator's line for each request there, one JSON line each (see
+# loadgen/loadgen.py). Exits non-zero if the job fails or any request failed.
 set -euo pipefail
 LABEL="${1:?usage: run-load.sh <label> <target> <seed> [args]}"
 TARGET="${2:?usage: run-load.sh <label> <target> <seed> [args]}"
@@ -43,7 +46,7 @@ kubectl -n "$NS" create configmap loadgen --from-file=loadgen.py="$ROOT/loadgen/
 before="$(counters)"
 
 args_json="$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
-  --target "$TARGET" --label "$LABEL" --seed "$SEED" "$@")"
+  --target "$TARGET" --label "$LABEL" --seed "$SEED" --records "$@")"
 kubectl -n "$NS" apply -f - >/dev/null <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -85,7 +88,12 @@ while kill -0 "$wc" 2>/dev/null && kill -0 "$wf" 2>/dev/null; do sleep 2; done
 if ! kill -0 "$wc" 2>/dev/null && wait "$wc"; then status=complete; fi
 kill "$wc" "$wf" 2>/dev/null || true
 
-summary="$(kubectl -n "$NS" logs "job/$JOB" 2>/dev/null | tail -n 1)"
+# The summary is the job's last line; each request's line comes before it.
+logs="$(kubectl -n "$NS" logs "job/$JOB" 2>/dev/null)"
+summary="$(tail -n 1 <<<"$logs")"
+if [ -n "${RECORDS:-}" ]; then
+  sed '$d' <<<"$logs" | grep '^{"session": ' >"$RECORDS" || true
+fi
 after="$(counters)"
 python3 -I - "$summary" "$before" "$after" "$status" <<'PY'
 import json, sys
@@ -102,6 +110,8 @@ s["cache_hit_rate"] = round(hits / queries, 3) if queries else None
 s["prompt_tokens"] = prompt
 s["output_tokens"] = output
 s["replicas_counted"] = len(both)
+names = ("hits", "queries", "prompt_tokens", "output_tokens")
+s["replica_counters"] = {when: {p: dict(zip(names, t[p])) for p in sorted(t)} for when, t in (("before", b), ("after", a))}
 s["job"] = sys.argv[4]
 print(json.dumps(s))
 PY

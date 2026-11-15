@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Does routing by prefix cache beat round-robin, on the same model servers?
 #
-#   tests/e2e.sh            (after scripts/up.sh; RESULTS=<dir> keeps the JSON;
-#                           MODEL names the model the servers serve)
+#   tests/e2e.sh            (after scripts/up.sh; RESULTS=<dir> keeps each load's
+#                           JSON and, beside it, its requests, one JSON line each,
+#                           in <label>-<seed>.jsonl; MODEL names the model the
+#                           servers serve)
 #
 # The same multi-turn load, 32 conversations of 6 turns, goes once through a
 # plain Service (kube-proxy picks a replica at random) and once through the
@@ -10,7 +12,10 @@
 # cache has seen. It requires:
 #   - every image a pod runs named in images.lock: on kind, in every
 #     namespace, kind's own included; on any other cluster (the GPU run's
-#     EKS), in the default namespace, where this repository's pods run;
+#     EKS), in the default namespace, where this repository's pods run.
+#     IMAGE_CHECK=default-namespace reads the default namespace on kind too,
+#     for a kind cluster with a GPU node, whose node image is not the one
+#     cluster/kind.yaml pins; the kind e2e workflow never sets it;
 #   - every request answered, on both routes;
 #   - through the router, a time to first token after the first turn (the
 #     turns a cache can help) of at most RATIO_MAX of round-robin's, at the
@@ -37,6 +42,7 @@ RATIO_MAX="${RATIO_MAX:-0.6}"
 HIT_GAIN_MIN="${HIT_GAIN_MIN:-0.2}"
 RATIO_PERCENTILE="${RATIO_PERCENTILE:-50}"
 JUDGE_ONLY="${JUDGE_ONLY:-0}"
+IMAGE_CHECK="${IMAGE_CHECK:-auto}"
 MODEL="${MODEL:-sim/model}"
 mkdir -p "$RESULTS"
 fail=0
@@ -45,8 +51,8 @@ trap 'rm -f "$said"' EXIT
 bad() { echo "FAIL: $*" >&2; echo "FAIL: ${*//$'\n'/ }" >>"$said"; fail=1; }
 ok() { echo "OK: $*"; echo "OK: $*" >>"$said"; }
 
-run() {  # run <label> <target> <seed>: one load, its JSON into $RESULTS
-  if ! "$ROOT/scripts/run-load.sh" "$1" "$2" "$3" --model "$MODEL" > "$RESULTS/$1-$3.json"; then
+run() {  # run <label> <target> <seed>: one load, its JSON and its requests into $RESULTS
+  if ! RECORDS="$RESULTS/$1-$3.jsonl" "$ROOT/scripts/run-load.sh" "$1" "$2" "$3" --model "$MODEL" > "$RESULTS/$1-$3.json"; then
     bad "$1 ($3): the load job failed or some requests failed: $(cut -c1-300 "$RESULTS/$1-$3.json")"
   fi
 }
@@ -57,10 +63,18 @@ if [ "$JUDGE_ONLY" != 1 ]; then
   # provider ID is kind://) that is every pod in every namespace: kind's own
   # pods name the images its node image carries, and cluster/kind.yaml pins
   # that image by digest. Elsewhere it is the default namespace: on EKS the
-  # pods in kube-system are the platform's, and the device plugin's.
+  # pods in kube-system are the platform's, and the device plugin's. On kind
+  # with a GPU node (IMAGE_CHECK=default-namespace) it is the default
+  # namespace too: that node is not the one cluster/kind.yaml pins, so kind's
+  # own pods run images images.lock does not name.
   all=""
-  case "$(kubectl get nodes -o jsonpath='{.items[*].spec.providerID}')" in *kind://*) all=1 ;; esac
+  case "$IMAGE_CHECK" in
+    auto) case "$(kubectl get nodes -o jsonpath='{.items[*].spec.providerID}')" in *kind://*) all=1 ;; esac ;;
+    default-namespace) ;;
+    *) echo "IMAGE_CHECK is auto or default-namespace, not $IMAGE_CHECK" >&2; exit 2 ;;
+  esac
   where="${all:+in every namespace}"; where="${where:-in the default namespace}"
+  [ "$IMAGE_CHECK" = auto ] || where="$where (IMAGE_CHECK=$IMAGE_CHECK)"
   pods="$(kubectl get pods ${all:+--all-namespaces} -o json)"
   running="$(python3 -I -c '
 import json, sys
