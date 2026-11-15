@@ -130,6 +130,23 @@ No apply has reached its 30 minutes since the interrupt was added: the six that 
 
 The apply now runs under `scripts/interrupt-after.py 30m 3m`: SIGINT to Terraform's process group at 30 minutes, SIGKILL only if Terraform has not ended 3 minutes later, and GNU timeout's statuses, 124 and 137. It is Python from the runner image and does not depend on which `timeout` an image ships. `tests/interrupt-after.sh` holds it to that on small numbers in the E2E workflow's lint job, shown nine breaks (`tests/interrupt-after-plants.tsv`), one of them uutils' SIGKILL a moment after the SIGINT, and fails if a workflow or a script gives `timeout` a signal or a kill after one again. The step's own timeout stays 34 minutes, and the down job runs whatever the apply did. Not yet run on a GPU: the first is the scheduled run of 2026-11-15.
 
+## 2026-11-15: the second scheduled pass, on the A10G, and a weekly result
+
+The third scheduled run, [43708005487](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/43708005487), started at 11:15 UTC, its cron time 03:23. In the first round it found no g6.xlarge in us-east-1a, 1b, 1c, 1d or 1f, and reserved a g5.xlarge in us-east-1d, after none in us-east-1a, 1b and 1c: **NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone**. The four replicas held 17,495 of its 23,028 MiB, on driver 580.178.04. It passed every check:
+
+| Round | 90th percentile after the first turn, round-robin and router | Median after the first turn | Hits, round-robin and router |
+|---|---|---|---|
+| 1 | 558 and 155 ms, 0.28 | 252 and 142 ms, 0.56 | 47% and 81% |
+| 2 | 688 and 155 ms, 0.23 | 263 and 138 ms, 0.53 | 44% and 81% |
+
+A million output tokens cost $0.83 through the router against $1.21 through round-robin on the g5.xlarge alone, $0.99 against $1.45 with the CPU node and the control plane. The run cost about $0.77, $0.67 of it the reservation for 0.66 h, and 16 reservations EC2 took and could not fill cost nothing. The residue check found nothing of it and nothing of any earlier run; the tagging API still listed 23 resources that the direct checks found gone.
+
+On the A10G the router's median sat under 0.6 of round-robin's, as it did by hand on 2026-10-30 (0.50 and 0.42), where the L4's has not in a scheduled run. The two cards' numbers are not one series and are not put in one row.
+
+The apply ran under `scripts/interrupt-after.py 30m 3m` on a GPU for the first time and took 12 minutes, so nothing was interrupted: the interrupt itself is still shown only by `tests/interrupt-after.sh` and the runner's probe, 43073469566.
+
+Decision: the condition of 2026-11-08 is met. Two scheduled runs in a row passed, [42472122098](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/42472122098) on 2026-11-08 on an NVIDIA L4 (g6.xlarge) and 43708005487 on 2026-11-15 on an NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone, so the README, the release notes and anything that quotes them may call the GPU run weekly, naming both runs and their cards. The claim follows the schedule: a scheduled run that fails, or finds no GPU in any zone, is written in the README as that, and "weekly" is claimed again only after two scheduled runs in a row pass. Both runs are saved under `tests/fixtures/gpu/`, their `results-gpu` artifacts unchanged, so `tests/gpu-judge.sh` replays six runs.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

@@ -1,0 +1,1 @@
+{"card": "NVIDIA L4 (g6.xlarge)", "gpu": "NVIDIA L4", "instance_type": "g6.xlarge", "driver": "580.178.04", "memory_used_mib": 17032, "memory_total_mib": 23034, "replicas": 4, "model": "Qwen/Qwen2.5-1.5B-Instruct"}

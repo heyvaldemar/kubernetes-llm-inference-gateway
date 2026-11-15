@@ -1,0 +1,35 @@
+{
+ "card": "NVIDIA L4 (g6.xlarge)",
+ "gpu_usd_per_hour": 0.8048,
+ "cluster_usd_per_hour": 1.0056,
+ "routes": {
+  "roundrobin": {
+   "runs": 2,
+   "requests": 384,
+   "output_tokens": 9144,
+   "prompt_tokens": 446894,
+   "wall_s": 52.66,
+   "output_tokens_per_s": 173.6,
+   "usd_per_million_output_tokens_gpu": 1.287,
+   "usd_per_million_output_tokens_cluster": 1.609,
+   "cache_hit_rate": [
+    0.45,
+    0.389
+   ]
+  },
+  "router": {
+   "runs": 2,
+   "requests": 384,
+   "output_tokens": 9136,
+   "prompt_tokens": 444405,
+   "wall_s": 41.89,
+   "output_tokens_per_s": 218.1,
+   "usd_per_million_output_tokens_gpu": 1.025,
+   "usd_per_million_output_tokens_cluster": 1.281,
+   "cache_hit_rate": [
+    0.811,
+    0.812
+   ]
+  }
+ }
+}
