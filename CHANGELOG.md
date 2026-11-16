@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **A release's signature is checked against its exact signer**: `release-assets.yml` verifies the cosign bundle against `.github/workflows/release-assets.yml@<the ref the run ran on>`, where it accepted any workflow of this repository on any branch, and the verify commands in its header name that identity. Its check that a changed archive is refused now needs each tool to refuse it for being changed, in its own words, so Sigstore out of reach or a missing tool fails the job where it passed it. A run started by hand runs from main only. Not yet run on a release; v1.4.0's archive verifies under the exact identity with `cosign verify-blob` and `slsa-verifier verify-artifact --source-tag v1.4.0`.
+
 ## [1.4.0] - 2026-11-15
 
 ### Added
