@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The third scheduled pass is a saved run**: `tests/fixtures/gpu/45018569314`, its `results-gpu` artifact unchanged, the four loads' per-request `.jsonl` files included, with an `expect` file, so `tests/gpu-judge.sh` replays seven GPU runs, where it replayed six.
+
+### Changed
+
+- **Each request kept, now on a GPU**: the scheduled run 45018569314 of 2026-11-22, on an NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone, was the first GPU run with 1.4.0's per-request records. Each load wrote 192 lines and the four pods' `replica_counters`, and the percentiles, hit rates and output tokens computed from them equal the summaries'.
+- **The weekly GPU result names 43708005487 and 45018569314**, the last two scheduled passes, both on the A10G, in the README, `AGENTS.md` and ADR 5; three scheduled runs in a row have passed.
+
 ### Security
 
 - **A run by hand never replaces a signature a release already carries.** `.github/workflows/release-assets.yml`, started by hand, now refuses a release that already has its signature, or one it cannot read. Replacing the files would have made the signature name `main` instead of the tag, and a check pinned to the tag's identity would then refuse the release. To replace them on purpose, delete the three files first.

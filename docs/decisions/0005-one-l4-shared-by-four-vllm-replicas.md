@@ -147,6 +147,23 @@ The apply ran under `scripts/interrupt-after.py 30m 3m` on a GPU for the first t
 
 Decision: the condition of 2026-11-08 is met. Two scheduled runs in a row passed, [42472122098](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/42472122098) on 2026-11-08 on an NVIDIA L4 (g6.xlarge) and 43708005487 on 2026-11-15 on an NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone, so the README, the release notes and anything that quotes them may call the GPU run weekly, naming both runs and their cards. The claim follows the schedule: a scheduled run that fails, or finds no GPU in any zone, is written in the README as that, and "weekly" is claimed again only after two scheduled runs in a row pass. Both runs are saved under `tests/fixtures/gpu/`, their `results-gpu` artifacts unchanged, so `tests/gpu-judge.sh` replays six runs.
 
+## 2026-11-22: the third scheduled pass, the first with each request kept
+
+The fourth scheduled run, [45018569314](https://github.com/heyvaldemar/kubernetes-llm-inference-gateway/actions/runs/45018569314), started at 11:41 UTC, its cron time 03:23. In the first round it found no g6.xlarge in us-east-1a, 1b, 1c, 1d or 1f, and reserved a g5.xlarge in us-east-1f, after none in us-east-1a, 1b, 1c and 1d: **NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone**. The four replicas held 17,495 of its 23,028 MiB, on driver 580.178.04. It passed every check:
+
+| Round | 90th percentile after the first turn, round-robin and router | Median after the first turn | Hits, round-robin and router |
+|---|---|---|---|
+| 1 | 537 and 164 ms, 0.31 | 297 and 140 ms, 0.47 | 44% and 81% |
+| 2 | 649 and 154 ms, 0.24 | 288 and 135 ms, 0.47 | 46% and 81% |
+
+A million output tokens cost $0.83 through the router against $1.21 through round-robin on the g5.xlarge alone, $0.99 against $1.45 with the CPU node and the control plane. The run cost about $0.79, $0.68 of it the reservation for 0.68 h, and 18 reservations EC2 took and could not fill cost nothing. The residue check found nothing of it and nothing of any earlier run; the tagging API still listed 25 resources that the direct checks found gone. The apply took 13 minutes under `scripts/interrupt-after.py 30m 3m`, so again nothing was interrupted.
+
+It is the first GPU run that kept each request (1.4.0). Each load's `.jsonl` holds 192 lines, 32 sessions of six turns, every one answered with status 200, and each load's `replica_counters` cover the four pods. The 90th percentile and the median after the first turn computed from the lines, and the hit rate and the output tokens computed from the counters, equal the summaries' to the last digit, so a round's tail can now be read request by request instead of taken from its percentile.
+
+No zone had an L4 for the second Sunday running. In the A10G's two scheduled runs the router's median sat at 0.47 to 0.56 of round-robin's and its 90th percentile at 0.23 to 0.31.
+
+Decision: "weekly" holds. Three scheduled runs in a row have passed, and the claim now names the last two, 43708005487 on 2026-11-15 and 45018569314 on 2026-11-22, both on an NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone. 45018569314 is saved under `tests/fixtures/gpu/` with its per-request lines, its `results-gpu` artifact unchanged, so `tests/gpu-judge.sh` replays seven runs.
+
 ## How to explain this to a customer
 
 The router's claim is that sending a conversation back to the server that already holds it costs less than spreading conversations evenly. On a laptop that is a ratio from a simulator. Here the same test runs on a real GPU with a real model each week, and each answer has a price: what a million generated tokens cost on each route, at AWS's on-demand price, on a GPU four servers share, as a small deployment would share one.

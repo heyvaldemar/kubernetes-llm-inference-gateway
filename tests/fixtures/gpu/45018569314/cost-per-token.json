@@ -1,0 +1,35 @@
+{
+ "card": "NVIDIA A10G (g5.xlarge), fallback: no L4 in any zone",
+ "gpu_usd_per_hour": 1.006,
+ "cluster_usd_per_hour": 1.2068,
+ "routes": {
+  "roundrobin": {
+   "runs": 2,
+   "requests": 384,
+   "output_tokens": 9147,
+   "prompt_tokens": 446897,
+   "wall_s": 39.65,
+   "output_tokens_per_s": 230.7,
+   "usd_per_million_output_tokens_gpu": 1.211,
+   "usd_per_million_output_tokens_cluster": 1.453,
+   "cache_hit_rate": [
+    0.435,
+    0.456
+   ]
+  },
+  "router": {
+   "runs": 2,
+   "requests": 384,
+   "output_tokens": 9130,
+   "prompt_tokens": 444436,
+   "wall_s": 27.02,
+   "output_tokens_per_s": 337.9,
+   "usd_per_million_output_tokens_gpu": 0.827,
+   "usd_per_million_output_tokens_cluster": 0.992,
+   "cache_hit_rate": [
+    0.811,
+    0.812
+   ]
+  }
+ }
+}
